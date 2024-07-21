@@ -154,11 +154,9 @@ bool ESP8266NetBIOS::begin(const char *name)
     if(_pcb != NULL) {
         return true;
     }
-    ip_addr_t addr;
-    addr.addr = INADDR_ANY;
     _pcb = udp_new();
     udp_recv(_pcb, &_s_recv, (void *) this);
-    err_t err = udp_bind(_pcb, &addr, NBNS_PORT);
+    err_t err = udp_bind(_pcb, (ip_addr_t*)INADDR_ANY, NBNS_PORT);
     if(err != ERR_OK) {
         end();
         return false;
@@ -174,11 +172,7 @@ void ESP8266NetBIOS::end()
     }
 }
 
-#if LWIP_VERSION_MAJOR == 1 
-void ESP8266NetBIOS::_recv(udp_pcb *upcb, pbuf *pb, ip_addr_t *addr, uint16_t port)
-#else
 void ESP8266NetBIOS::_recv(udp_pcb *upcb, pbuf *pb, const ip_addr_t *addr, uint16_t port)
-#endif
 {
     (void)upcb;
     (void)addr;
@@ -186,9 +180,8 @@ void ESP8266NetBIOS::_recv(udp_pcb *upcb, pbuf *pb, const ip_addr_t *addr, uint1
     while(pb != NULL) {
         uint8_t * data = (uint8_t*)((pb)->payload);
         size_t len = pb->len;
-        ip_hdr* iphdr = reinterpret_cast<ip_hdr*>(data - UDP_HLEN - IP_HLEN);
-        ip_addr_t saddr;
-        saddr.addr = iphdr->src.addr;
+        // check UdpContext.h
+        const ip_addr_t* saddr = &ip_data.current_iphdr_src;
 
         if (len >= sizeof(struct NBNSQUESTION)) {
             struct NBNSQUESTION * question = (struct NBNSQUESTION *)data;
@@ -219,13 +212,12 @@ void ESP8266NetBIOS::_recv(udp_pcb *upcb, pbuf *pb, const ip_addr_t *addr, uint1
                     nbnsa.NBNSA_TIMETOLIVE = LWIP_PLATFORM_HTONL(300000UL);// Time to live (30000 sekund)
                     nbnsa.NBNSA_LENGTH = LWIP_PLATFORM_HTONS(6);
                     nbnsa.NBNSA_NODEFLAGS = LWIP_PLATFORM_HTONS(0);
-                    nbnsa.NBNSA_NODEADDRESS = WiFi.localIP(); // ulozime nasi IP adresu
-
+                    nbnsa.NBNSA_NODEADDRESS = ip_addr_get_ip4_u32(&ip_current_netif()->ip_addr);
                     pbuf* pbt = pbuf_alloc(PBUF_TRANSPORT, sizeof(nbnsa), PBUF_RAM);
                     if(pbt != NULL) {
                         uint8_t* dst = reinterpret_cast<uint8_t*>(pbt->payload);
                         memcpy(dst, (uint8_t *)&nbnsa, sizeof(nbnsa));
-                        udp_sendto(_pcb, pbt, &saddr, NBNS_PORT);
+                        udp_sendto(_pcb, pbt, saddr, NBNS_PORT);
                         pbuf_free(pbt);
                     }
                 } else if (0 == strcmp(name, "*")) {
@@ -255,7 +247,7 @@ void ESP8266NetBIOS::_recv(udp_pcb *upcb, pbuf *pb, const ip_addr_t *addr, uint1
                     if(pbt != NULL) {
                         uint8_t* dst = reinterpret_cast<uint8_t*>(pbt->payload);
                         memcpy(dst, (uint8_t *)&nbnsan, sizeof(nbnsan));
-                        udp_sendto(_pcb, pbt, &saddr, NBNS_PORT);
+                        udp_sendto(_pcb, pbt, saddr, NBNS_PORT);
                         pbuf_free(pbt);
                     }
                 }
@@ -269,11 +261,7 @@ void ESP8266NetBIOS::_recv(udp_pcb *upcb, pbuf *pb, const ip_addr_t *addr, uint1
     }
 }
 
-#if LWIP_VERSION_MAJOR == 1
-void ESP8266NetBIOS::_s_recv(void *arg, udp_pcb *upcb, pbuf *p, struct ip_addr *addr, uint16_t port)
-#else
 void ESP8266NetBIOS::_s_recv(void *arg, udp_pcb *upcb, pbuf *p, const ip_addr_t *addr, uint16_t port)
-#endif
 {
     reinterpret_cast<ESP8266NetBIOS*>(arg)->_recv(upcb, p, addr, port);
 }

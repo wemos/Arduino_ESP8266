@@ -36,9 +36,7 @@ extern "C" {
 }
 
 #include "debug.h"
-
-extern "C" void esp_schedule();
-extern "C" void esp_yield();
+#include <coredecls.h>
 
 // -----------------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------- Private functions ------------------------------------------------
@@ -94,11 +92,13 @@ int8_t ESP8266WiFiScanClass::scanNetworks(bool async, bool show_hidden, uint8 ch
         ESP8266WiFiScanClass::_scanStarted = true;
 
         if(ESP8266WiFiScanClass::_scanAsync) {
-            delay(0); // time for the OS to trigger the scan
+            esp_yield(); // time for the OS to trigger the scan
             return WIFI_SCAN_RUNNING;
         }
 
-        esp_yield();
+        // will resume when _scanDone fires
+        esp_suspend([]() { return !ESP8266WiFiScanClass::_scanComplete && ESP8266WiFiScanClass::_scanStarted; });
+
         return ESP8266WiFiScanClass::_scanCount;
     } else {
         return WIFI_SCAN_FAILED;
@@ -147,6 +147,14 @@ void ESP8266WiFiScanClass::scanDelete() {
     _scanComplete = false;
 }
 
+/**
+ * returns const pointer to the requested scanned wifi entry for furthor parsing.
+ * @param networkItem int
+ * @return struct bss_info*, may be NULL
+ */
+const bss_info *ESP8266WiFiScanClass::getScanInfoByIndex(int i) {
+    return reinterpret_cast<const bss_info*>(_getScanInfoByIndex(i));
+};
 
 /**
  * loads all infos from a scanned wifi in to the ptr parameters
@@ -165,7 +173,10 @@ bool ESP8266WiFiScanClass::getNetworkInfo(uint8_t i, String &ssid, uint8_t &encT
         return false;
     }
 
-    ssid = (const char*) it->ssid;
+    char ssid_copy[33]; // Ensure space for maximum len SSID (32) plus trailing 0
+    memcpy(ssid_copy, it->ssid, sizeof(it->ssid));
+    ssid_copy[32] = 0; // Potentially add 0-termination if none present earlier
+    ssid = (const char*) ssid_copy;
     encType = encryptionType(i);
     rssi = it->rssi;
     bssid = it->bssid; // move ptr
@@ -186,8 +197,11 @@ String ESP8266WiFiScanClass::SSID(uint8_t i) {
     if(!it) {
         return "";
     }
+    char tmp[33]; //ssid can be up to 32chars, => plus null term
+    memcpy(tmp, it->ssid, sizeof(it->ssid));
+    tmp[32] = 0; //nullterm in case of 32 char ssid
 
-    return String(reinterpret_cast<const char*>(it->ssid));
+    return String(reinterpret_cast<const char*>(tmp));
 }
 
 
@@ -243,6 +257,21 @@ uint8_t * ESP8266WiFiScanClass::BSSID(uint8_t i) {
         return 0;
     }
     return it->bssid;
+}
+
+/**
+ * fill MAC / BSSID of scanned wifi
+ * @param i specify from which network item want to get the information
+ * @param bssid  pointer to uint8_t array with length WL_MAC_ADDR_LENGTH
+ * @return uint8_t * MAC / BSSID of scanned wifi
+ */
+uint8_t * ESP8266WiFiScanClass::BSSID(uint8_t i, uint8_t* bssid) {
+    struct bss_info* it = reinterpret_cast<struct bss_info*>(_getScanInfoByIndex(i));
+    if(!it) {
+        return 0;
+    }
+    memcpy(bssid, it->bssid, WL_MAC_ADDR_LENGTH);
+    return bssid;
 }
 
 /**
@@ -316,8 +345,8 @@ void ESP8266WiFiScanClass::_scanDone(void* result, int status) {
     ESP8266WiFiScanClass::_scanStarted = false;
     ESP8266WiFiScanClass::_scanComplete = true;
 
-    if(!ESP8266WiFiScanClass::_scanAsync) {
-        esp_schedule();
+    if (!ESP8266WiFiScanClass::_scanAsync) {
+        esp_schedule(); // resume scanNetworks
     } else if (ESP8266WiFiScanClass::_onComplete) {
         ESP8266WiFiScanClass::_onComplete(ESP8266WiFiScanClass::_scanCount);
         ESP8266WiFiScanClass::_onComplete = nullptr;

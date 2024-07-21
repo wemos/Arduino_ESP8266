@@ -626,6 +626,52 @@ typedef struct {
 } br_name_element;
 
 /**
+ * \brief Callback for validity date checks.
+ *
+ * The function receives as parameter an arbitrary user-provided context,
+ * and the notBefore and notAfter dates specified in an X.509 certificate,
+ * both expressed as a number of days and a number of seconds:
+ *
+ *   - Days are counted in a proleptic Gregorian calendar since
+ *     January 1st, 0 AD. Year "0 AD" is the one that preceded "1 AD";
+ *     it is also traditionally known as "1 BC".
+ *
+ *   - Seconds are counted since midnight, from 0 to 86400 (a count of
+ *     86400 is possible only if a leap second happened).
+ *
+ * Each date and time is understood in the UTC time zone. The "Unix
+ * Epoch" (January 1st, 1970, 00:00 UTC) corresponds to days=719528 and
+ * seconds=0; the "Windows Epoch" (January 1st, 1601, 00:00 UTC) is
+ * days=584754, seconds=0.
+ *
+ * This function must return -1 if the current date is strictly before
+ * the "notBefore" time, or +1 if the current date is strictly after the
+ * "notAfter" time. If neither condition holds, then the function returns
+ * 0, which means that the current date falls within the validity range of
+ * the certificate. If the function returns a value distinct from -1, 0
+ * and +1, then this is interpreted as an unavailability of the current
+ * time, which normally ends the validation process with a
+ * `BR_ERR_X509_TIME_UNKNOWN` error.
+ *
+ * During path validation, this callback will be invoked for each
+ * considered X.509 certificate. Validation fails if any of the calls
+ * returns a non-zero value.
+ *
+ * The context value is an abritrary pointer set by the caller when
+ * configuring this callback.
+ *
+ * \param tctx                 context pointer.
+ * \param not_before_days      notBefore date (days since Jan 1st, 0 AD).
+ * \param not_before_seconds   notBefore time (seconds, at most 86400).
+ * \param not_after_days       notAfter date (days since Jan 1st, 0 AD).
+ * \param not_after_seconds    notAfter time (seconds, at most 86400).
+ * \return  -1, 0 or +1.
+ */
+typedef int (*br_x509_time_check)(void *tctx,
+	uint32_t not_before_days, uint32_t not_before_seconds,
+	uint32_t not_after_days, uint32_t not_after_seconds);
+
+/**
  * \brief The "minimal" X.509 engine structure.
  *
  * The structure contents are opaque (they shall not be accessed directly),
@@ -647,8 +693,8 @@ typedef struct {
 		uint32_t *rp;
 		const unsigned char *ip;
 	} cpu;
-	uint32_t dp_stack[32];
-	uint32_t rp_stack[32];
+	uint32_t dp_stack[31];
+	uint32_t rp_stack[31];
 	int err;
 
 	/* Server name to match with the SAN / CN of the EE certificate. */
@@ -729,6 +775,12 @@ typedef struct {
 	 */
 	br_name_element *name_elts;
 	size_t num_name_elts;
+
+	/*
+	 * Callback function (and context) to get the current date.
+	 */
+	void *itime_ctx;
+	br_x509_time_check itime;
 
 	/*
 	 * Public key cryptography implementations (signature verification).
@@ -890,7 +942,10 @@ void br_x509_minimal_init_full(br_x509_minimal_context *ctx,
  *   - Seconds are counted since midnight, from 0 to 86400 (a count of
  *     86400 is possible only if a leap second happened).
  *
- * The validation date and time is understood in the UTC time zone.
+ * The validation date and time is understood in the UTC time zone. The
+ * "Unix Epoch" (January 1st, 1970, 00:00 UTC) corresponds to days=719528
+ * and seconds=0; the "Windows Epoch" (January 1st, 1601, 00:00 UTC) is
+ * days=584754, seconds=0.
  *
  * If the validation date and time are not explicitly set, but BearSSL
  * was compiled with support for the system clock on the underlying
@@ -908,6 +963,28 @@ br_x509_minimal_set_time(br_x509_minimal_context *ctx,
 {
 	ctx->days = days;
 	ctx->seconds = seconds;
+	ctx->itime = 0;
+}
+
+/**
+ * \brief Set the validity range callback function for the X.509
+ * "minimal" engine.
+ *
+ * The provided function will be invoked to check whether the validation
+ * date is within the validity range for a given X.509 certificate; a
+ * call will be issued for each considered certificate. The provided
+ * context pointer (itime_ctx) will be passed as first parameter to the
+ * callback.
+ *
+ * \param tctx   context for callback invocation.
+ * \param cb     callback function.
+ */
+static inline void
+br_x509_minimal_set_time_callback(br_x509_minimal_context *ctx,
+	void *itime_ctx, br_x509_time_check itime)
+{
+	ctx->itime_ctx = itime_ctx;
+	ctx->itime = itime;
 }
 
 /**
@@ -1443,6 +1520,147 @@ br_pkey_decoder_get_ec(const br_pkey_decoder_context *ctx)
 		return NULL;
 	}
 }
+
+/**
+ * \brief Encode an RSA private key (raw DER format).
+ *
+ * This function encodes the provided key into the "raw" format specified
+ * in PKCS#1 (RFC 8017, Appendix C, type `RSAPrivateKey`), with DER
+ * encoding rules.
+ *
+ * The key elements are:
+ *
+ *  - `sk`: the private key (`p`, `q`, `dp`, `dq` and `iq`)
+ *
+ *  - `pk`: the public key (`n` and `e`)
+ *
+ *  - `d` (size: `dlen` bytes): the private exponent
+ *
+ * The public key elements, and the private exponent `d`, can be
+ * recomputed from the private key (see `br_rsa_compute_modulus()`,
+ * `br_rsa_compute_pubexp()` and `br_rsa_compute_privexp()`).
+ *
+ * If `dest` is not `NULL`, then the encoded key is written at that
+ * address, and the encoded length (in bytes) is returned. If `dest` is
+ * `NULL`, then nothing is written, but the encoded length is still
+ * computed and returned.
+ *
+ * \param dest   the destination buffer (or `NULL`).
+ * \param sk     the RSA private key.
+ * \param pk     the RSA public key.
+ * \param d      the RSA private exponent.
+ * \param dlen   the RSA private exponent length (in bytes).
+ * \return  the encoded key length (in bytes).
+ */
+size_t br_encode_rsa_raw_der(void *dest, const br_rsa_private_key *sk,
+	const br_rsa_public_key *pk, const void *d, size_t dlen);
+
+/**
+ * \brief Encode an RSA private key (PKCS#8 DER format).
+ *
+ * This function encodes the provided key into the PKCS#8 format
+ * (RFC 5958, type `OneAsymmetricKey`). It wraps around the "raw DER"
+ * format for the RSA key, as implemented by `br_encode_rsa_raw_der()`.
+ *
+ * The key elements are:
+ *
+ *  - `sk`: the private key (`p`, `q`, `dp`, `dq` and `iq`)
+ *
+ *  - `pk`: the public key (`n` and `e`)
+ *
+ *  - `d` (size: `dlen` bytes): the private exponent
+ *
+ * The public key elements, and the private exponent `d`, can be
+ * recomputed from the private key (see `br_rsa_compute_modulus()`,
+ * `br_rsa_compute_pubexp()` and `br_rsa_compute_privexp()`).
+ *
+ * If `dest` is not `NULL`, then the encoded key is written at that
+ * address, and the encoded length (in bytes) is returned. If `dest` is
+ * `NULL`, then nothing is written, but the encoded length is still
+ * computed and returned.
+ *
+ * \param dest   the destination buffer (or `NULL`).
+ * \param sk     the RSA private key.
+ * \param pk     the RSA public key.
+ * \param d      the RSA private exponent.
+ * \param dlen   the RSA private exponent length (in bytes).
+ * \return  the encoded key length (in bytes).
+ */
+size_t br_encode_rsa_pkcs8_der(void *dest, const br_rsa_private_key *sk,
+	const br_rsa_public_key *pk, const void *d, size_t dlen);
+
+/**
+ * \brief Encode an EC private key (raw DER format).
+ *
+ * This function encodes the provided key into the "raw" format specified
+ * in RFC 5915 (type `ECPrivateKey`), with DER encoding rules.
+ *
+ * The private key is provided in `sk`, the public key being `pk`. If
+ * `pk` is `NULL`, then the encoded key will not include the public key
+ * in its `publicKey` field (which is nominally optional).
+ *
+ * If `dest` is not `NULL`, then the encoded key is written at that
+ * address, and the encoded length (in bytes) is returned. If `dest` is
+ * `NULL`, then nothing is written, but the encoded length is still
+ * computed and returned.
+ *
+ * If the key cannot be encoded (e.g. because there is no known OBJECT
+ * IDENTIFIER for the used curve), then 0 is returned.
+ *
+ * \param dest   the destination buffer (or `NULL`).
+ * \param sk     the EC private key.
+ * \param pk     the EC public key (or `NULL`).
+ * \return  the encoded key length (in bytes), or 0.
+ */
+size_t br_encode_ec_raw_der(void *dest,
+	const br_ec_private_key *sk, const br_ec_public_key *pk);
+
+/**
+ * \brief Encode an EC private key (PKCS#8 DER format).
+ *
+ * This function encodes the provided key into the PKCS#8 format
+ * (RFC 5958, type `OneAsymmetricKey`). The curve is identified
+ * by an OID provided as parameters to the `privateKeyAlgorithm`
+ * field. The private key value (contents of the `privateKey` field)
+ * contains the DER encoding of the `ECPrivateKey` type defined in
+ * RFC 5915, without the `parameters` field (since they would be
+ * redundant with the information in `privateKeyAlgorithm`).
+ *
+ * The private key is provided in `sk`, the public key being `pk`. If
+ * `pk` is not `NULL`, then the encoded public key is included in the
+ * `publicKey` field of the private key value (but not in the `publicKey`
+ * field of the PKCS#8 `OneAsymmetricKey` wrapper).
+ *
+ * If `dest` is not `NULL`, then the encoded key is written at that
+ * address, and the encoded length (in bytes) is returned. If `dest` is
+ * `NULL`, then nothing is written, but the encoded length is still
+ * computed and returned.
+ *
+ * If the key cannot be encoded (e.g. because there is no known OBJECT
+ * IDENTIFIER for the used curve), then 0 is returned.
+ *
+ * \param dest   the destination buffer (or `NULL`).
+ * \param sk     the EC private key.
+ * \param pk     the EC public key (or `NULL`).
+ * \return  the encoded key length (in bytes), or 0.
+ */
+size_t br_encode_ec_pkcs8_der(void *dest,
+	const br_ec_private_key *sk, const br_ec_public_key *pk);
+
+/**
+ * \brief PEM banner for RSA private key (raw).
+ */
+#define BR_ENCODE_PEM_RSA_RAW      "RSA PRIVATE KEY"
+
+/**
+ * \brief PEM banner for EC private key (raw).
+ */
+#define BR_ENCODE_PEM_EC_RAW       "EC PRIVATE KEY"
+
+/**
+ * \brief PEM banner for an RSA or EC private key in PKCS#8 format.
+ */
+#define BR_ENCODE_PEM_PKCS8        "PRIVATE KEY"
 
 #ifdef __cplusplus
 }

@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#    http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,15 +19,18 @@ Arduino Wiring-based Framework allows writing cross-platform software to
 control devices attached to a wide range of Arduino boards to create all
 kinds of creative coding, interactive objects, spaces or physical experiences.
 
-http://arduino.cc/en/Reference/HomePage
+https://arduino.cc/en/Reference/HomePage
 """
+
+# For SCons documentation, see:
+# https://scons.org/doc/latest
 
 # Extends: https://github.com/platformio/platform-espressif8266/blob/develop/builder/main.py
 
 from os.path import isdir, join
 
-from SCons import Builder, Util
-from SCons.Script import DefaultEnvironment
+from SCons import Util
+from SCons.Script import Builder, DefaultEnvironment
 
 
 def scons_patched_match_splitext(path, suffixes=None):
@@ -45,16 +48,28 @@ Builder.match_splitext = scons_patched_match_splitext
 
 env = DefaultEnvironment()
 platform = env.PioPlatform()
+board = env.BoardConfig()
+gzip_fw = board.get("build.gzip_fw", False)
+gzip_switch = []
 
 FRAMEWORK_DIR = platform.get_package_dir("framework-arduinoespressif8266")
 assert isdir(FRAMEWORK_DIR)
 
+if gzip_fw:
+    gzip_switch = ["--gzip", "PIO"]
 
 env.Append(
-    ASFLAGS=["-x", "assembler-with-cpp"],
+    ASFLAGS=[
+        "-mlongcalls",
+        "-mtext-section-literals",
+    ],
+    ASPPFLAGS=[
+        "-x", "assembler-with-cpp",
+    ],
 
+    # General options that are passed to the C compiler (C only; not C++)
     CFLAGS=[
-        "-std=gnu99",
+        "-std=gnu17",
         "-Wpointer-arith",
         "-Wno-implicit-function-declaration",
         "-Wl,-EL",
@@ -62,6 +77,7 @@ env.Append(
         "-nostdlib"
     ],
 
+    # General options that are passed to the C and C++ compilers
     CCFLAGS=[
         "-Os",  # optimize for size
         "-mlongcalls",
@@ -70,15 +86,19 @@ env.Append(
         "-U__STRICT_ANSI__",
         "-ffunction-sections",
         "-fdata-sections",
-        "-Wall"
+        "-Wall",
+        "-Werror=return-type",
+        "-free",
+        "-fipa-pta"
     ],
 
+    # General options that are passed to the C++ compiler
     CXXFLAGS=[
         "-fno-rtti",
-        "-fno-exceptions",
-        "-std=c++11"
+        "-std=gnu++17"
     ],
 
+    # General user options passed to the linker
     LINKFLAGS=[
         "-Os",
         "-nostdlib",
@@ -89,91 +109,322 @@ env.Append(
         "-Wl,-wrap,spi_flash_read",
         "-u", "app_entry",
         "-u", "_printf_float",
-        "-u", "_scanf_float"
+        "-u", "_scanf_float",
+        "-u", "_DebugExceptionVector",
+        "-u", "_DoubleExceptionVector",
+        "-u", "_KernelExceptionVector",
+        "-u", "_NMIExceptionVector",
+        "-u", "_UserExceptionVector"
     ],
 
+    # A platform independent specification of C preprocessor definitions as either:
+    # - -DFLAG as "FLAG"
+    # - -DFLAG=VALUE as ("FLAG", "VALUE")
     CPPDEFINES=[
         ("F_CPU", "$BOARD_F_CPU"),
         "__ets__",
         "ICACHE_FLASH",
+        "_GNU_SOURCE",
         ("ARDUINO", 10805),
-        ("ARDUINO_BOARD", '\\"PLATFORMIO_%s\\"'
-            % env.BoardConfig().id.upper()),
+        ("ARDUINO_BOARD", '\\"PLATFORMIO_%s\\"' % env.BoardConfig().id.upper()),
+        ("ARDUINO_BOARD_ID", '\\"%s\\"' % env.BoardConfig().id),
+        "FLASHMODE_${BOARD_FLASH_MODE.upper()}",
         "LWIP_OPEN_SRC"
     ],
 
+    # The list of directories that the C preprocessor will search for include directories
     CPPPATH=[
         join(FRAMEWORK_DIR, "tools", "sdk", "include"),
-        join(FRAMEWORK_DIR, "tools", "sdk", "libc",
-             "xtensa-lx106-elf", "include"),
-        join(FRAMEWORK_DIR, "cores", env.BoardConfig().get("build.core"))
+        join(FRAMEWORK_DIR, "cores", env.BoardConfig().get("build.core")),
+        join(platform.get_package_dir("toolchain-xtensa"), "include")
     ],
 
+    # The list of directories that will be searched for libraries
     LIBPATH=[
         join("$BUILD_DIR", "ld"),  # eagle.app.v6.common.ld
         join(FRAMEWORK_DIR, "tools", "sdk", "lib"),
-        join(FRAMEWORK_DIR, "tools", "sdk", "ld"),
-        join(FRAMEWORK_DIR, "tools", "sdk", "libc", "xtensa-lx106-elf", "lib")
+        join(FRAMEWORK_DIR, "tools", "sdk", "ld")
     ],
 
-    LIBS=[
-        "hal", "phy", "pp", "net80211", "wpa", "crypto", "main",
-        "wps", "bearssl", "axtls", "espnow", "smartconfig", "airkiss", "wpa2",
-        "stdc++", "m", "c", "gcc"
-    ],
+    # LIBS is set at the bottom of the builder script
+    # where we know about all system libraries to be included
 
     LIBSOURCE_DIRS=[
         join(FRAMEWORK_DIR, "libraries")
-    ]
+    ],
+
+    BUILDERS=dict(
+        ElfToBin=Builder(
+            action=env.VerboseAction(" ".join([
+                '"$PYTHONEXE"',
+                '"%s"' % join(FRAMEWORK_DIR, "tools", "elf2bin.py"),
+                "--eboot", '"%s"' % join(
+                    FRAMEWORK_DIR, "bootloaders", "eboot", "eboot.elf"),
+                "--app", "$SOURCE",
+                "--flash_mode", "$BOARD_FLASH_MODE",
+                "--flash_freq", "${__get_board_f_flash(__env__)}",
+                "--flash_size", "${__get_flash_size(__env__)}",
+                "--path", '"%s"' % join(
+                    platform.get_package_dir("toolchain-xtensa"), "bin"),
+                "--out", "$TARGET"
+            ] + gzip_switch), "Building $TARGET"),
+            suffix=".bin"
+        )
+    )
 )
 
-# copy CCFLAGS to ASFLAGS (-x assembler-with-cpp mode)
-env.Append(ASFLAGS=env.get("CCFLAGS", [])[:])
+#
+# SDK
+#
+NONOSDK_VERSIONS = (
+    ("SDK22x_190703", "NONOSDK22x_190703"),
+    ("SDK221", "NONOSDK221"),
+    ("SDK22x_190313", "NONOSDK22x_190313"),
+    ("SDK22x_191024", "NONOSDK22x_191024"),
+    ("SDK22x_191105", "NONOSDK22x_191105"),
+    ("SDK22x_191122", "NONOSDK22x_191122"),
+    ("SDK305", "NONOSDK305"),
+)
+nonosdk_version = NONOSDK_VERSIONS[0]
 
-flatten_cppdefines = env.Flatten(env['CPPDEFINES'])
+NONOSDK_PREFIX = "PIO_FRAMEWORK_ARDUINO_ESPRESSIF_"
+for define in env["CPPDEFINES"]:
+    if isinstance(define, (tuple, list)):
+        define, *_ = define
+    if define.startswith(NONOSDK_PREFIX):
+        for version in NONOSDK_VERSIONS:
+            name, _ = version
+            if define.endswith(name):
+                nonosdk_version = version
+
+NONOSDK_LIBPATH=join(FRAMEWORK_DIR, "tools", "sdk", "lib", nonosdk_version[1])
+assert isdir(NONOSDK_LIBPATH)
+
+env.Append(
+    CPPDEFINES=[(nonosdk_version[1], 1)],
+    LIBPATH=[NONOSDK_LIBPATH],
+)
 
 #
 # lwIP
 #
-if "PIO_FRAMEWORK_ARDUINO_LWIP2_LOW_MEMORY" in flatten_cppdefines:
+flatten_cppdefines = env.Flatten(env["CPPDEFINES"])
+
+lwip_lib = None
+if "PIO_FRAMEWORK_ARDUINO_LWIP2_IPV6_LOW_MEMORY" in flatten_cppdefines:
     env.Append(
-        CPPDEFINES=[("TCP_MSS", 536)],
+        CPPDEFINES=[("TCP_MSS", 536), ("LWIP_FEATURES", 1), ("LWIP_IPV6", 1)],
         CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip2", "include")],
-        LIBS=["lwip2"]
     )
+    lwip_lib = "lwip6-536-feat"
+elif "PIO_FRAMEWORK_ARDUINO_LWIP2_IPV6_HIGHER_BANDWIDTH" in flatten_cppdefines:
+    env.Append(
+        CPPDEFINES=[("TCP_MSS", 1460), ("LWIP_FEATURES", 1), ("LWIP_IPV6", 1)],
+        CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip2", "include")],
+    )
+    lwip_lib = "lwip6-1460-feat"
 elif "PIO_FRAMEWORK_ARDUINO_LWIP2_HIGHER_BANDWIDTH" in flatten_cppdefines:
     env.Append(
-        CPPDEFINES=[("TCP_MSS", 1460)],
+        CPPDEFINES=[("TCP_MSS", 1460), ("LWIP_FEATURES", 1), ("LWIP_IPV6", 0)],
         CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip2", "include")],
-        LIBS=["lwip2_1460"]
     )
+    lwip_lib = "lwip2-1460-feat"
+elif "PIO_FRAMEWORK_ARDUINO_LWIP2_LOW_MEMORY_LOW_FLASH" in flatten_cppdefines:
+    env.Append(
+        CPPDEFINES=[("TCP_MSS", 536), ("LWIP_FEATURES", 0), ("LWIP_IPV6", 0)],
+        CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip2", "include")],
+    )
+    lwip_lib = "lwip2-536"
+elif "PIO_FRAMEWORK_ARDUINO_LWIP2_HIGHER_BANDWIDTH_LOW_FLASH" in flatten_cppdefines:
+    env.Append(
+        CPPDEFINES=[("TCP_MSS", 1460), ("LWIP_FEATURES", 0), ("LWIP_IPV6", 0)],
+        CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip2", "include")],
+    )
+    lwip_lib = "lwip2-1460"
+# PIO_FRAMEWORK_ARDUINO_LWIP2_LOW_MEMORY (default)
 else:
     env.Append(
-        CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip", "include")],
-        LIBS=["lwip_gcc"]
+        CPPDEFINES=[("TCP_MSS", 536), ("LWIP_FEATURES", 1), ("LWIP_IPV6", 0)],
+        CPPPATH=[join(FRAMEWORK_DIR, "tools", "sdk", "lwip2", "include")],
     )
+    lwip_lib = "lwip2-536-feat"
 
+#
+# Waveform
+#
+if "PIO_FRAMEWORK_ARDUINO_WAVEFORM_LOCKED_PHASE" in flatten_cppdefines:
+    env.Append(CPPDEFINES=[("WAVEFORM_LOCKED_PHASE", 1)])
+# PIO_FRAMEWORK_ARDUINO_WAVEFORM_LOCKED_PWM will be used by default
+
+#
+# Exceptions
+#
+stdcpp_lib = None
+if "PIO_FRAMEWORK_ARDUINO_ENABLE_EXCEPTIONS" in flatten_cppdefines:
+    env.Append(
+        CXXFLAGS=["-fexceptions"],
+    )
+    stdcpp_lib = "stdc++-exc"
+else:
+    env.Append(
+        CXXFLAGS=["-fno-exceptions"],
+    )
+    stdcpp_lib = "stdc++"
 #
 # VTables
 #
 
 current_vtables = None
+current_fp = None
 for d in flatten_cppdefines:
     if str(d).startswith("VTABLES_IN_"):
         current_vtables = d
+    if str(d).startswith("FP_IN_"):
+        current_fp = d
+
 if not current_vtables:
     current_vtables = "VTABLES_IN_FLASH"
     env.Append(CPPDEFINES=[current_vtables])
 assert current_vtables
+
+if not current_fp:
+    current_fp = "FP_IN_IROM"
+    env.Append(CPPDEFINES=[current_fp])
+assert current_fp
+
+#
+# MMU
+#
+
+mmu_flags = []
+required_flags = ("MMU_IRAM_SIZE", "MMU_ICACHE_SIZE")
+if "PIO_FRAMEWORK_ARDUINO_MMU_CACHE16_IRAM48" in flatten_cppdefines:
+    mmu_flags = [("MMU_IRAM_SIZE", "0xC000"), ("MMU_ICACHE_SIZE", "0x4000")]
+elif "PIO_FRAMEWORK_ARDUINO_MMU_CACHE16_IRAM48_SECHEAP_SHARED" in flatten_cppdefines:
+    mmu_flags = [
+        ("MMU_IRAM_SIZE", "0xC000"),
+        ("MMU_ICACHE_SIZE", "0x4000"),
+        "MMU_IRAM_HEAP",
+    ]
+elif "PIO_FRAMEWORK_ARDUINO_MMU_CACHE16_IRAM32_SECHEAP_NOTSHARED" in flatten_cppdefines:
+    mmu_flags = [
+        ("MMU_IRAM_SIZE", "0x8000"),
+        ("MMU_ICACHE_SIZE", "0x4000"),
+        ("MMU_SEC_HEAP_SIZE", "0x4000"),
+        ("MMU_SEC_HEAP", "0x40108000"),
+    ]
+elif "PIO_FRAMEWORK_ARDUINO_MMU_EXTERNAL_128K" in flatten_cppdefines:
+    mmu_flags = [
+        ("MMU_IRAM_SIZE", "0x8000"),
+        ("MMU_ICACHE_SIZE", "0x8000"),
+        ("MMU_EXTERNAL_HEAP", "128"),
+    ]
+elif "PIO_FRAMEWORK_ARDUINO_MMU_EXTERNAL_1024K" in flatten_cppdefines:
+    mmu_flags = [
+        ("MMU_IRAM_SIZE", "0x8000"),
+        ("MMU_ICACHE_SIZE", "0x8000"),
+        ("MMU_EXTERNAL_HEAP", "256"),
+    ]
+elif "PIO_FRAMEWORK_ARDUINO_MMU_CUSTOM" in flatten_cppdefines:
+    if not all(d in flatten_cppdefines for d in required_flags):
+        print(
+            "Error: Missing custom MMU configuration flags (%s)!"
+            % ", ".join(required_flags)
+        )
+        env.Exit(1)
+
+    for flag in env["CPPDEFINES"]:
+        define = flag
+        if isinstance(flag, (tuple, list)):
+            define, *_ = flag
+        if define.startswith("MMU_"):
+            mmu_flags.append(flag)
+# PIO_FRAMEWORK_ARDUINO_MMU_CACHE32_IRAM32 (default)
+else:
+    mmu_flags = [
+        ("MMU_IRAM_SIZE", board.get("build.mmu_iram_size", "0x8000")),
+        ("MMU_ICACHE_SIZE", board.get("build.mmu_icache_size", "0x8000"))]
+    if any(f in flatten_cppdefines for f in required_flags):
+        print(
+            "Warning! Detected custom MMU flags. Please use the "
+            "`-D PIO_FRAMEWORK_ARDUINO_MMU_CUSTOM` option to disable "
+            "the default configuration."
+        )
+
+assert mmu_flags
+env.Append(CPPDEFINES=mmu_flags)
+
+# A list of one or more libraries that will be linked with any executable programs created by this environment
+# We do this at this point so that we can put the libraries in their correct order more easily
+env.Append(
+    LIBS=[
+        "hal", "phy", "pp", "net80211", lwip_lib, "wpa", "crypto", "main",
+        "wps", "bearssl", "espnow", "smartconfig", "airkiss", "wpa2",
+        stdcpp_lib, "m", "c", "gcc"
+    ]
+)
 
 # Build the eagle.app.v6.common.ld linker file
 app_ld = env.Command(
     join("$BUILD_DIR", "ld", "local.eagle.app.v6.common.ld"),
     join(FRAMEWORK_DIR, "tools", "sdk", "ld", "eagle.app.v6.common.ld.h"),
     env.VerboseAction(
-        "$CC -CC -E -P -D%s $SOURCE -o $TARGET" % current_vtables,
-        "Generating LD script $TARGET"))
+        "$CC -CC -E -P -D%s -D%s %s $SOURCE -o $TARGET"
+        % (
+            current_vtables,
+            current_fp,
+            # String representation of MMU flags
+            " ".join(
+                [
+                    "-D%s=%s" % f if isinstance(f, (tuple, list)) else "-D" + f
+                    for f in mmu_flags
+                ]
+            ),
+        ),
+        "Generating LD script $TARGET",
+    ),
+)
 env.Depends("$BUILD_DIR/$PROGNAME$PROGSUFFIX", app_ld)
+
+if not env.BoardConfig().get("build.ldscript", ""):
+    env.Replace(LDSCRIPT_PATH=env.BoardConfig().get("build.arduino.ldscript", ""))
+
+#
+# Dynamic core_version.h for staging builds
+#
+
+
+def platform_txt_version(default):
+    with open(join(FRAMEWORK_DIR, "platform.txt"), "r") as platform_txt:
+        for line in platform_txt:
+            if not line:
+                continue
+            k, delim, v = line.partition("=")
+            if not delim:
+                continue
+            if k == "version":
+                return v.strip()
+
+    return default
+
+
+if isdir(join(FRAMEWORK_DIR, ".git")):
+    cmd = '"$PYTHONEXE" "{script}" -b "$BUILD_DIR" -p "{framework_dir}" -v {version}'
+    fmt = {
+        "script": join(FRAMEWORK_DIR, "tools", "makecorever.py"),
+        "framework_dir": FRAMEWORK_DIR,
+        "version": platform_txt_version("unspecified")
+    }
+
+    env.Prepend(CPPPATH=[
+        join("$BUILD_DIR", "core")
+    ])
+    core_version = env.Command(
+        join("$BUILD_DIR", "core", "core_version.h"),
+        join(FRAMEWORK_DIR, ".git"),
+        env.VerboseAction(cmd.format(**fmt), "Generating $TARGET")
+    )
+    env.Depends("$BUILD_DIR/$PROGNAME$PROGSUFFIX", core_version)
 
 
 #

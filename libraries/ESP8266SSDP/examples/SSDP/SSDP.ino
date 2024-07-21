@@ -2,8 +2,13 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266SSDP.h>
 
-const char* ssid = "************";
-const char* password = "***********";
+#ifndef STASSID
+#define STASSID "your-ssid"
+#define STAPSK "your-password"
+#endif
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
 
 ESP8266WebServer HTTP(80);
 
@@ -41,9 +46,7 @@ void setup() {
     Serial.printf("Ready!\n");
   } else {
     Serial.printf("WiFi Failed\n");
-    while (1) {
-      delay(100);
-    }
+    while (1) { delay(100); }
   }
 }
 

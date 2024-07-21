@@ -18,7 +18,7 @@
  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
-#include "Arduino.h"
+#include "Esp.h"
 #include "flash_utils.h"
 #include "eboot_command.h"
 #include <memory>
@@ -26,6 +26,12 @@
 #include "MD5Builder.h"
 #include "umm_malloc/umm_malloc.h"
 #include "cont.h"
+#include "flash_hal.h"
+#include "coredecls.h"
+#include "umm_malloc/umm_malloc.h"
+#include <pgmspace.h>
+#include "reboot_uart_dwnld.h"
+#include "hardware_reset.h"
 
 extern "C" {
 #include "user_interface.h"
@@ -36,6 +42,9 @@ extern struct rst_info resetInfo;
 
 //#define DEBUG_SERIAL Serial
 
+#ifndef PUYA_SUPPORT
+  #define PUYA_SUPPORT 1
+#endif
 
 /**
  * User-defined Literals
@@ -107,20 +116,18 @@ void EspClass::wdtFeed(void)
     system_soft_wdt_feed();
 }
 
-extern "C" void esp_yield();
-
 void EspClass::deepSleep(uint64_t time_us, WakeMode mode)
 {
     system_deep_sleep_set_option(static_cast<int>(mode));
     system_deep_sleep(time_us);
-    esp_yield();
+    esp_suspend();
 }
 
 void EspClass::deepSleepInstant(uint64_t time_us, WakeMode mode)
 {
     system_deep_sleep_set_option(static_cast<int>(mode));
     system_deep_sleep_instant(time_us);
-    esp_yield();
+    esp_suspend();
 }
 
 //this calculation was taken verbatim from the SDK api reference for SDK 2.1.0.
@@ -132,9 +139,43 @@ uint64_t EspClass::deepSleepMax()
 
 }
 
+/*
+Layout of RTC Memory is as follows:
+Ref: Espressif doc 2C-ESP8266_Non_OS_SDK_API_Reference, section 3.3.23 (system_rtc_mem_write)
+
+|<------system data (256 bytes)------->|<-----------------user data (512 bytes)--------------->|
+
+SDK function signature:
+bool	system_rtc_mem_read	(
+				uint32	des_addr,
+				void	*	src_addr,
+				uint32	save_size
+)
+
+The system data section can't be used by the user, so:
+des_addr must be >=64 (i.e.: 256/4) and <192 (i.e.: 768/4)
+src_addr is a pointer to data
+save_size is the number of bytes to write
+
+For the method interface:
+offset is the user block number (block size is 4 bytes) must be >= 0 and <128
+data is a pointer to data, 4-byte aligned
+size is number of bytes in the block pointed to by data
+
+Same for write
+
+Note: If the Updater class is in play, e.g.: the application uses OTA, the eboot
+command will be stored into the first 128 bytes of user data, then it will be
+retrieved by eboot on boot. That means that user data present there will be lost.
+Ref:
+- discussion in PR #5330.
+- https://github.com/esp8266/esp8266-wiki/wiki/Memory-Map#memmory-mapped-io-registers
+- Arduino/bootloaders/eboot/eboot_command.h RTC_MEM definition
+*/
+
 bool EspClass::rtcUserMemoryRead(uint32_t offset, uint32_t *data, size_t size)
 {
-    if (size + offset > 512) {
+    if (offset * 4 + size > 512 || size == 0) {
         return false;
     } else {
         return system_rtc_mem_read(64 + offset, data, size);
@@ -143,14 +184,13 @@ bool EspClass::rtcUserMemoryRead(uint32_t offset, uint32_t *data, size_t size)
 
 bool EspClass::rtcUserMemoryWrite(uint32_t offset, uint32_t *data, size_t size)
 {
-    if (size + offset > 512) {
+    if (offset * 4 + size > 512 || size == 0) {
         return false;
     } else {
         return system_rtc_mem_write(64 + offset, data, size);
     }
 }
 
-extern "C" void __real_system_restart_local();
 void EspClass::reset(void)
 {
     __real_system_restart_local();
@@ -159,28 +199,45 @@ void EspClass::reset(void)
 void EspClass::restart(void)
 {
     system_restart();
-    esp_yield();
+    esp_suspend();
+}
+
+[[noreturn]] void EspClass::rebootIntoUartDownloadMode()
+{
+	wdtDisable();
+	/* disable hardware watchdog */
+	CLEAR_PERI_REG_MASK(PERIPHS_HW_WDT, 0x1);
+
+	esp8266RebootIntoUartDownloadMode();
 }
 
 uint16_t EspClass::getVcc(void)
 {
-    InterruptLock lock;
+    esp8266::InterruptLock lock;
+    (void)lock;
     return system_get_vdd33();
 }
 
 uint32_t EspClass::getFreeHeap(void)
 {
-    return system_get_free_heap_size();
+    return umm_free_heap_size_lw();
 }
 
-uint16_t EspClass::getMaxFreeBlockSize(void)
+#if defined(UMM_INFO)
+uint32_t EspClass::getMaxFreeBlockSize(void)
 {
     return umm_max_block_size();
 }
+#endif
 
 uint32_t EspClass::getFreeContStack()
 {
     return cont_get_free_stack(g_pcont);
+}
+
+void EspClass::resetFreeContStack()
+{
+    cont_repaint_stack(g_pcont);
 }
 
 uint32_t EspClass::getChipId(void)
@@ -216,15 +273,18 @@ uint8_t EspClass::getBootMode(void)
     return system_get_boot_mode();
 }
 
-uint8_t EspClass::getCpuFreqMHz(void)
-{
-    return system_get_cpu_freq();
-}
-
-
 uint32_t EspClass::getFlashChipId(void)
 {
-    return spi_flash_get_id();
+    static uint32_t flash_chip_id = 0;
+    if (flash_chip_id == 0) {
+        flash_chip_id = spi_flash_get_id();
+    }
+    return flash_chip_id;
+}
+
+uint8_t EspClass::getFlashChipVendorId(void)
+{
+    return (getFlashChipId() & 0x000000ff);
 }
 
 uint32_t EspClass::getFlashChipRealSize(void)
@@ -234,6 +294,9 @@ uint32_t EspClass::getFlashChipRealSize(void)
 
 uint32_t EspClass::getFlashChipSize(void)
 {
+#if FLASH_MAP_SUPPORT
+    return getFlashChipRealSize();
+#else
     uint32_t data;
     uint8_t * bytes = (uint8_t *) &data;
     // read first 4 byte (magic byte + flash config)
@@ -241,6 +304,7 @@ uint32_t EspClass::getFlashChipSize(void)
         return magicFlashChipSize((bytes[3] & 0xf0) >> 4);
     }
     return 0;
+#endif
 }
 
 uint32_t EspClass::getFlashChipSpeed(void)
@@ -266,6 +330,7 @@ FlashMode_t EspClass::getFlashChipMode(void)
     return mode;
 }
 
+#if !FLASH_MAP_SUPPORT
 uint32_t EspClass::magicFlashChipSize(uint8_t byte) {
     switch(byte & 0x0F) {
         case 0x0: // 4 Mbit (512KB)
@@ -286,6 +351,7 @@ uint32_t EspClass::magicFlashChipSize(uint8_t byte) {
             return 0;
     }
 }
+#endif
 
 uint32_t EspClass::magicFlashChipSpeed(uint8_t byte) {
     switch(byte & 0x0F) {
@@ -346,6 +412,8 @@ uint32_t EspClass::getFlashChipSizeByChipId(void) {
             return (64_kB);
 
         // Winbond
+        case 0x1840EF: // W25Q128
+            return (16_MB);
         case 0x1640EF: // W25Q32
             return (4_MB);
         case 0x1540EF: // W25Q16
@@ -364,6 +432,10 @@ uint32_t EspClass::getFlashChipSizeByChipId(void) {
             return (1_MB);
         case 0x1340E0: // BG25Q40
             return (512_kB);
+
+        // XMC - Wuhan Xinxin Semiconductor Manufacturing Corp
+        case 0x164020: // XM25QH32B
+            return (4_MB);
 
         default:
             return 0;
@@ -388,35 +460,59 @@ bool EspClass::checkFlashConfig(bool needsEquals) {
     return false;
 }
 
+// These are defined in the linker script, and filled in by the elf2bin.py util
+extern "C" uint32_t __crc_len;
+extern "C" uint32_t __crc_val;
+
+bool EspClass::checkFlashCRC() {
+    // Dummy CRC fill
+    uint32_t z[2];
+    z[0] = z[1] = 0;
+
+    uint32_t firstPart = (uintptr_t)&__crc_len - 0x40200000; // How many bytes to check before the 1st CRC val
+
+    // Start the checksum
+    uint32_t crc = crc32((const void*)0x40200000, firstPart);
+    // Pretend the 2 words of crc/len are zero to be idempotent
+    crc = crc32(z, 8, crc);
+    // Finish the CRC calculation over the rest of flash
+    crc = crc32((const void*)(0x40200000 + firstPart + 8), __crc_len - (firstPart + 8), crc);
+    return crc == __crc_val;
+}
+
+
 String EspClass::getResetReason(void) {
-    char buff[32];
-    if (resetInfo.reason == REASON_DEFAULT_RST) { // normal startup by power on
-      strcpy_P(buff, PSTR("Power on"));
-    } else if (resetInfo.reason == REASON_WDT_RST) { // hardware watch dog reset
-      strcpy_P(buff, PSTR("Hardware Watchdog"));
-    } else if (resetInfo.reason == REASON_EXCEPTION_RST) { // exception reset, GPIO status won’t change
-      strcpy_P(buff, PSTR("Exception"));
-    } else if (resetInfo.reason == REASON_SOFT_WDT_RST) { // software watch dog reset, GPIO status won’t change
-      strcpy_P(buff, PSTR("Software Watchdog"));
-    } else if (resetInfo.reason == REASON_SOFT_RESTART) { // software restart ,system_restart , GPIO status won’t change
-      strcpy_P(buff, PSTR("Software/System restart"));
-    } else if (resetInfo.reason == REASON_DEEP_SLEEP_AWAKE) { // wake up from deep-sleep
-      strcpy_P(buff, PSTR("Deep-Sleep Wake"));
-    } else if (resetInfo.reason == REASON_EXT_SYS_RST) { // external system reset
-      strcpy_P(buff, PSTR("External System"));
-    } else {
-      strcpy_P(buff, PSTR("Unknown"));
+    const __FlashStringHelper* buff;
+
+    switch(resetInfo.reason) {
+        // normal startup by power on
+        case REASON_DEFAULT_RST:      buff = F("Power On"); break;
+        // hardware watch dog reset
+        case REASON_WDT_RST:          buff = F("Hardware Watchdog"); break;
+        // exception reset, GPIO status won’t change
+        case REASON_EXCEPTION_RST:    buff = F("Exception"); break;
+        // software watch dog reset, GPIO status won’t change
+        case REASON_SOFT_WDT_RST:     buff = F("Software Watchdog"); break;
+        // software restart ,system_restart , GPIO status won’t change
+        case REASON_SOFT_RESTART:     buff = F("Software/System restart"); break;
+        // wake up from deep-sleep
+        case REASON_DEEP_SLEEP_AWAKE: buff = F("Deep-Sleep Wake"); break;
+        // // external system reset
+        case REASON_EXT_SYS_RST:      buff = F("External System"); break;
+        default:                      buff = F("Unknown"); break;
     }
     return String(buff);
 }
 
 String EspClass::getResetInfo(void) {
-    if(resetInfo.reason != 0) {
+    if (resetInfo.reason >= REASON_WDT_RST && resetInfo.reason <= REASON_SOFT_WDT_RST) {
         char buff[200];
-        sprintf(&buff[0], "Fatal exception:%d flag:%d (%s) epc1:0x%08x epc2:0x%08x epc3:0x%08x excvaddr:0x%08x depc:0x%08x", resetInfo.exccause, resetInfo.reason, (resetInfo.reason == 0 ? "DEFAULT" : resetInfo.reason == 1 ? "WDT" : resetInfo.reason == 2 ? "EXCEPTION" : resetInfo.reason == 3 ? "SOFT_WDT" : resetInfo.reason == 4 ? "SOFT_RESTART" : resetInfo.reason == 5 ? "DEEP_SLEEP_AWAKE" : resetInfo.reason == 6 ? "EXT_SYS_RST" : "???"), resetInfo.epc1, resetInfo.epc2, resetInfo.epc3, resetInfo.excvaddr, resetInfo.depc);
+        sprintf_P(buff, PSTR("Fatal exception:%d flag:%d (%s) epc1:0x%08x epc2:0x%08x epc3:0x%08x excvaddr:0x%08x depc:0x%08x"),
+            resetInfo.exccause, resetInfo.reason, getResetReason().c_str(),
+            resetInfo.epc1, resetInfo.epc2, resetInfo.epc3, resetInfo.excvaddr, resetInfo.depc);
         return String(buff);
     }
-    return String("flag: 0");
+    return getResetReason();
 }
 
 struct rst_info * EspClass::getResetInfoPtr(void) {
@@ -424,7 +520,7 @@ struct rst_info * EspClass::getResetInfoPtr(void) {
 }
 
 bool EspClass::eraseConfig(void) {
-    const size_t cfgSize = 0x4000;
+    const size_t cfgSize = 0x4000;  // Sectors: RF_CAL + SYSTEMPARAM[3]
     size_t cfgAddr = ESP.getFlashChipSize() - cfgSize;
 
     for (size_t offset = 0; offset < cfgSize; offset += SPI_FLASH_SEC_SIZE) {
@@ -436,6 +532,74 @@ bool EspClass::eraseConfig(void) {
     return true;
 }
 
+bool EspClass::eraseConfigAndReset(void) {
+    // Before calling, ensure the WiFi state is equivalent to
+    // "WiFi.mode(WIFI_OFF)." This will reduce the likelihood of the SDK
+    // performing WiFi data writes to Flash between erasing and resetting.
+    bool reset = eraseConfig();
+    if (reset) {
+        hardware_reset();
+    }
+    return reset;
+}
+
+uint8_t *EspClass::random(uint8_t *resultArray, const size_t outputSizeBytes)
+{
+  /**
+   * The ESP32 Technical Reference Manual v4.1 chapter 24 has the following to say about random number generation (no information found for ESP8266):
+   *
+   * "When used correctly, every 32-bit value the system reads from the RNG_DATA_REG register of the random number generator is a true random number.
+   * These true random numbers are generated based on the noise in the Wi-Fi/BT RF system.
+   * When Wi-Fi and BT are disabled, the random number generator will give out pseudo-random numbers.
+   *
+   * When Wi-Fi or BT is enabled, the random number generator is fed two bits of entropy every APB clock cycle (normally 80 MHz).
+   * Thus, for the maximum amount of entropy, it is advisable to read the random register at a maximum rate of 5 MHz.
+   * A data sample of 2 GB, read from the random number generator with Wi-Fi enabled and the random register read at 5 MHz,
+   * has been tested using the Dieharder Random Number Testsuite (version 3.31.1).
+   * The sample passed all tests."
+   *
+   * Since ESP32 is the sequal to ESP8266 it is unlikely that the ESP8266 is able to generate random numbers more quickly than 5 MHz when run at a 80 MHz frequency.
+   * A maximum random number frequency of 0.5 MHz is used here to leave some margin for possibly inferior components in the ESP8266.
+   * It should be noted that the ESP8266 has no Bluetooth functionality, so turning the WiFi off is likely to cause RANDOM_REG32 to use pseudo-random numbers.
+   *
+   * It is possible that yield() must be called on the ESP8266 to properly feed the hardware random number generator new bits, since there is only one processor core available.
+   * However, no feeding requirements are mentioned in the ESP32 documentation, and using yield() could possibly cause extended delays during number generation.
+   * Thus only delayMicroseconds() is used below.
+   */
+
+  constexpr uint8_t cooldownMicros = 2;
+  static uint32_t lastCalledMicros = micros() - cooldownMicros;
+
+  uint32_t randomNumber = 0;
+
+  for(size_t byteIndex = 0; byteIndex < outputSizeBytes; ++byteIndex)
+  {
+    if(byteIndex % 4 == 0)
+    {
+      // Old random number has been used up (random number could be exactly 0, so we can't check for that)
+
+      uint32_t timeSinceLastCall = micros() - lastCalledMicros;
+      if(timeSinceLastCall < cooldownMicros)
+        delayMicroseconds(cooldownMicros - timeSinceLastCall);
+
+      randomNumber = RANDOM_REG32;
+      lastCalledMicros = micros();
+    }
+
+    resultArray[byteIndex] = randomNumber;
+    randomNumber >>= 8;
+  }
+
+  return resultArray;
+}
+
+uint32_t EspClass::random()
+{
+  union { uint32_t b32; uint8_t b8[4]; } result;
+  random(result.b8, 4);
+  return result.b32;
+}
+
 uint32_t EspClass::getSketchSize() {
     static uint32_t result = 0;
     if (result)
@@ -443,7 +607,7 @@ uint32_t EspClass::getSketchSize() {
 
     image_header_t image_header;
     uint32_t pos = APP_START_OFFSET;
-    if (spi_flash_read(pos, (uint32_t*) &image_header, sizeof(image_header))) {
+    if (spi_flash_read(pos, (uint32_t*) &image_header, sizeof(image_header)) != SPI_FLASH_RESULT_OK) {
         return 0;
     }
     pos += sizeof(image_header);
@@ -455,7 +619,7 @@ uint32_t EspClass::getSketchSize() {
         ++section_index)
     {
         section_header_t section_header = {0, 0};
-        if (spi_flash_read(pos, (uint32_t*) &section_header, sizeof(section_header))) {
+        if (spi_flash_read(pos, (uint32_t*) &section_header, sizeof(section_header)) != SPI_FLASH_RESULT_OK) {
             return 0;
         }
         pos += sizeof(section_header);
@@ -468,14 +632,12 @@ uint32_t EspClass::getSketchSize() {
     return result;
 }
 
-extern "C" uint32_t _SPIFFS_start;
-
 uint32_t EspClass::getFreeSketchSpace() {
 
     uint32_t usedSize = getSketchSize();
     // round one sector up
     uint32_t freeSpaceStart = (usedSize + FLASH_SECTOR_SIZE - 1) & (~(FLASH_SECTOR_SIZE - 1));
-    uint32_t freeSpaceEnd = (uint32_t)&_SPIFFS_start - 0x40200000;
+    uint32_t freeSpaceEnd = (uint32_t)FS_start - 0x40200000;
 
 #ifdef DEBUG_SERIAL
     DEBUG_SERIAL.printf("usedSize=%u freeSpaceStart=%u freeSpaceEnd=%u\r\n", usedSize, freeSpaceStart, freeSpaceEnd);
@@ -521,24 +683,265 @@ bool EspClass::updateSketch(Stream& in, uint32_t size, bool restartOnFail, bool 
 static const int FLASH_INT_MASK = ((B10 << 8) | B00111010);
 
 bool EspClass::flashEraseSector(uint32_t sector) {
-    ets_isr_mask(FLASH_INT_MASK);
     int rc = spi_flash_erase_sector(sector);
-    ets_isr_unmask(FLASH_INT_MASK);
     return rc == 0;
 }
 
-bool EspClass::flashWrite(uint32_t offset, uint32_t *data, size_t size) {
-    ets_isr_mask(FLASH_INT_MASK);
-    int rc = spi_flash_write(offset, (uint32_t*) data, size);
-    ets_isr_unmask(FLASH_INT_MASK);
-    return rc == 0;
+// Adapted from the old version of `flash_hal_write()` (before 3.0.0), which was used for SPIFFS to allow
+// writing from both unaligned u8 buffers and to an unaligned offset on flash.
+// Updated version re-uses some of the code from RTOS, replacing individual methods for block & page
+// writes with just a single one
+// https://github.com/espressif/ESP8266_RTOS_SDK/blob/master/components/spi_flash/src/spi_flash.c
+// (if necessary, we could follow the esp-idf code and introduce flash chip drivers controling more than just writing methods?)
+
+// This is a generic writer that does not cross page boundaries.
+// Offset, data address and size *must* be 4byte aligned.
+static SpiFlashOpResult spi_flash_write_page_break(uint32_t offset, uint32_t *data, size_t size) {
+    static constexpr uint32_t PageSize { FLASH_PAGE_SIZE };
+    size_t size_page_aligned = PageSize - (offset % PageSize);
+
+    // most common case, we don't cross a page and simply write the data
+    if (size < size_page_aligned) {
+        return spi_flash_write(offset, data, size);
+    }
+
+    // otherwise, write the initial part and continue writing breaking each page interval
+    SpiFlashOpResult result = SPI_FLASH_RESULT_ERR;
+    if ((result = spi_flash_write(offset, data, size_page_aligned)) != SPI_FLASH_RESULT_OK) {
+        return result;
+    }
+
+    const auto last_page = (size - size_page_aligned) / PageSize;
+    for (uint32_t page = 0; page < last_page; ++page) {
+        if ((result = spi_flash_write(offset + size_page_aligned, data + (size_page_aligned >> 2), PageSize)) != SPI_FLASH_RESULT_OK) {
+            return result;
+        }
+
+        size_page_aligned += PageSize;
+    }
+
+    // finally, the remaining data
+    return spi_flash_write(offset + size_page_aligned, data + (size_page_aligned >> 2), size - size_page_aligned);
 }
 
-bool EspClass::flashRead(uint32_t offset, uint32_t *data, size_t size) {
-    ets_isr_mask(FLASH_INT_MASK);
-    int rc = spi_flash_read(offset, (uint32_t*) data, size);
-    ets_isr_unmask(FLASH_INT_MASK);
-    return rc == 0;
+#if PUYA_SUPPORT
+// Special wrapper for spi_flash_write *only for PUYA flash chips*
+// Already handles paging, could be used as a `spi_flash_write_page_break` replacement
+static SpiFlashOpResult spi_flash_write_puya(uint32_t offset, uint32_t *data, size_t size) {
+    if (data == nullptr) {
+      return SPI_FLASH_RESULT_ERR;
+    }
+    if (size % 4 != 0) {
+      return SPI_FLASH_RESULT_ERR;
+    }
+    // PUYA flash chips need to read existing data, update in memory and write modified data again.
+    static uint32_t *flash_write_puya_buf = nullptr;
+
+    if (flash_write_puya_buf == nullptr) {
+        flash_write_puya_buf = (uint32_t*) malloc(FLASH_PAGE_SIZE);
+        // No need to ever free this, since the flash chip will never change at runtime.
+        if (flash_write_puya_buf == nullptr) {
+            // Memory could not be allocated.
+            return SPI_FLASH_RESULT_ERR;
+        }
+    }
+
+    SpiFlashOpResult rc = SPI_FLASH_RESULT_OK;
+    uint32_t* ptr = data;
+    size_t bytesLeft = size;
+    uint32_t pos = offset;
+    while (bytesLeft > 0 && rc == SPI_FLASH_RESULT_OK) {
+        size_t bytesNow = bytesLeft;
+        if (bytesNow > FLASH_PAGE_SIZE) {
+            bytesNow = FLASH_PAGE_SIZE;
+            bytesLeft -= FLASH_PAGE_SIZE;
+        } else {
+            bytesLeft = 0;
+        }
+        rc = spi_flash_read(pos, flash_write_puya_buf, bytesNow);
+        if (rc != SPI_FLASH_RESULT_OK) {
+            return rc;
+        }
+        for (size_t i = 0; i < bytesNow / 4; ++i) {
+            flash_write_puya_buf[i] &= *ptr;
+            ++ptr;
+        }
+        rc = spi_flash_write(pos, flash_write_puya_buf, bytesNow);
+        pos += bytesNow;
+    }
+    return rc;
+}
+#endif
+
+static constexpr size_t Alignment { 4 };
+
+template <typename T>
+static T aligned(T value) {
+    static constexpr auto Mask = Alignment - 1;
+    return (value + Mask) & ~Mask;
+}
+
+template <typename T>
+static T alignBefore(T value) {
+    return aligned(value) - Alignment;
+}
+
+static bool isAlignedAddress(uint32_t address) {
+    return (address & (Alignment - 1)) == 0;
+}
+
+static bool isAlignedSize(size_t size) {
+    return (size & (Alignment - 1)) == 0;
+}
+
+static bool isAlignedPointer(const uint8_t *ptr) {
+    return isAlignedAddress(reinterpret_cast<uint32_t>(ptr));
+}
+
+
+size_t EspClass::flashWriteUnalignedMemory(uint32_t address, const uint8_t *data, size_t size) {
+    auto flash_write = [](uint32_t address, uint8_t *data, size_t size) {
+        return spi_flash_write(address, reinterpret_cast<uint32_t *>(data), size) == SPI_FLASH_RESULT_OK;
+    };
+
+    auto flash_read = [](uint32_t address, uint8_t *data, size_t size) {
+        return spi_flash_read(address, reinterpret_cast<uint32_t *>(data), size) == SPI_FLASH_RESULT_OK;
+    };
+
+    constexpr size_t BufferSize { FLASH_PAGE_SIZE };
+    alignas(alignof(uint32_t)) uint8_t buf[BufferSize];
+
+    size_t written = 0;
+
+    if (!isAlignedAddress(address)) {
+        auto before_address = alignBefore(address);
+        auto offset = address - before_address;
+        auto wlen = std::min(Alignment - offset, size);
+
+        if (!flash_read(before_address, &buf[0], Alignment)) {
+            return 0;
+        }
+
+#if PUYA_SUPPORT
+        if (getFlashChipVendorId() == SPI_FLASH_VENDOR_PUYA) {
+            for (size_t i = 0; i < wlen ; ++i) {
+                buf[offset + i] &= data[i];
+            }
+        } else {
+#endif
+            memcpy(&buf[offset], data, wlen);
+#if PUYA_SUPPORT
+        }
+#endif
+
+        if (!flash_write(before_address, &buf[0], Alignment)) {
+            return 0;
+        }
+
+        address += wlen;
+        data += wlen;
+        written += wlen;
+        size -= wlen;
+    }
+
+    while (size > 0) {
+        auto len = std::min(size, BufferSize);
+        auto wlen = aligned(len);
+
+        if (wlen != len) {
+            auto partial = wlen - Alignment;
+            if (!flash_read(address + partial, &buf[partial], Alignment)) {
+                return written;
+            }
+        }
+
+        memcpy(&buf[0], data, len);
+        if (!flashWrite(address, reinterpret_cast<const uint32_t *>(&buf[0]), wlen)) {
+            return written;
+        }
+
+        address += len;
+        data += len;
+        written += len;
+        size -= len;
+    }
+
+    return written;
+}
+
+bool EspClass::flashWrite(uint32_t address, const uint32_t *data, size_t size) {
+    SpiFlashOpResult result;
+#if PUYA_SUPPORT
+    if (getFlashChipVendorId() == SPI_FLASH_VENDOR_PUYA) {
+        result = spi_flash_write_puya(address, const_cast<uint32_t *>(data), size);
+    }
+    else
+#endif
+    {
+        result = spi_flash_write_page_break(address, const_cast<uint32_t *>(data), size);
+    }
+    return result == SPI_FLASH_RESULT_OK;
+}
+
+bool EspClass::flashWrite(uint32_t address, const uint8_t *data, size_t size) {
+    if (data && size) {
+        if (!isAlignedAddress(address)
+         || !isAlignedPointer(data)
+         || !isAlignedSize(size))
+        {
+            return flashWriteUnalignedMemory(address, data, size) == size;
+        }
+
+        return flashWrite(address, reinterpret_cast<const uint32_t *>(data), size);
+    }
+
+    return false;
+}
+
+bool EspClass::flashRead(uint32_t address, uint8_t *data, size_t size) {
+    size_t sizeAligned = size & ~3;
+    size_t currentOffset = 0;
+
+    if ((uintptr_t)data % 4 != 0) {
+        constexpr size_t BufferSize { FLASH_PAGE_SIZE / sizeof(uint32_t) };
+        alignas(alignof(uint32_t)) uint32_t buf[BufferSize];
+        size_t sizeLeft = sizeAligned;
+
+        while (sizeLeft) {
+            size_t willCopy = std::min(sizeLeft, BufferSize);
+            // We read to our aligned buffer and then copy to data
+            if (!flashRead(address + currentOffset, &buf[0], willCopy))
+            {
+                return false;
+            }
+            memcpy(data + currentOffset, &buf[0], willCopy);
+            sizeLeft -= willCopy;
+            currentOffset += willCopy;
+        }
+    } else {
+        // Pointer is properly aligned, so use aligned read
+        if (!flashRead(address, reinterpret_cast<uint32_t *>(data), sizeAligned)) {
+            return false;
+        }
+        currentOffset = sizeAligned;
+    }
+
+    if (currentOffset < size) {
+        uint32_t tempData;
+        if (spi_flash_read(address + currentOffset, &tempData, sizeof(tempData)) != SPI_FLASH_RESULT_OK) {
+            return false;
+        }
+        memcpy(data + currentOffset, &tempData, size - currentOffset);
+    }
+
+    return true;
+}
+
+bool EspClass::flashRead(uint32_t address, uint32_t *data, size_t size) {
+    if ((uintptr_t)data % 4 != 0 || size % 4 != 0) {
+        return false;
+    }
+    return (spi_flash_read(address, data, size) == SPI_FLASH_RESULT_OK);
 }
 
 String EspClass::getSketchMD5()
@@ -549,17 +952,17 @@ String EspClass::getSketchMD5()
     }
     uint32_t lengthLeft = getSketchSize();
     const size_t bufSize = 512;
-    std::unique_ptr<uint8_t[]> buf(new uint8_t[bufSize]);
+    std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[bufSize]);
     uint32_t offset = 0;
     if(!buf.get()) {
-        return String();
+        return emptyString;
     }
     MD5Builder md5;
     md5.begin();
     while( lengthLeft > 0) {
         size_t readBytes = (lengthLeft < bufSize) ? lengthLeft : bufSize;
-        if (!flashRead(offset, reinterpret_cast<uint32_t*>(buf.get()), (readBytes + 3) & ~3)) {
-            return String();
+        if (!flashRead(offset, reinterpret_cast<uint32_t *>(buf.get()), (readBytes + 3) & ~3)) {
+            return emptyString;
         }
         md5.add(buf.get(), readBytes);
         lengthLeft -= readBytes;
@@ -568,4 +971,48 @@ String EspClass::getSketchMD5()
     md5.calculate();
     result = md5.toString();
     return result;
+}
+
+void EspClass::setExternalHeap()
+{
+#ifdef UMM_HEAP_EXTERNAL
+    if (!umm_push_heap(UMM_HEAP_EXTERNAL)) {
+        panic();
+    }
+#endif
+}
+
+void EspClass::setIramHeap()
+{
+#ifdef UMM_HEAP_IRAM
+    if (!umm_push_heap(UMM_HEAP_IRAM)) {
+        panic();
+    }
+#endif
+}
+
+void EspClass::setDramHeap()
+{
+#if defined(UMM_HEAP_EXTERNAL) && !defined(UMM_HEAP_IRAM)
+    if (!umm_push_heap(UMM_HEAP_DRAM)) {
+        panic();
+    }
+#elif defined(UMM_HEAP_IRAM)
+    if (!umm_push_heap(UMM_HEAP_DRAM)) {
+        panic();
+    }
+#endif
+}
+
+void EspClass::resetHeap()
+{
+#if defined(UMM_HEAP_EXTERNAL) && !defined(UMM_HEAP_IRAM)
+    if (!umm_pop_heap()) {
+        panic();
+    }
+#elif defined(UMM_HEAP_IRAM)
+    if (!umm_pop_heap()) {
+        panic();
+    }
+#endif
 }

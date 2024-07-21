@@ -25,6 +25,10 @@
 #include "ESP8266WiFi.h"
 #include "ESP8266WiFiGeneric.h"
 #include "ESP8266WiFiSTA.h"
+#include "PolledTimeout.h"
+#include "LwipIntf.h"
+
+#include <coredecls.h>
 
 #include "c_types.h"
 #include "ets_sys.h"
@@ -37,13 +41,10 @@
 extern "C" {
 #include "lwip/err.h"
 #include "lwip/dns.h"
-#include "lwip/init.h" // LWIP_VERSION_
+#include "lwip/dhcp.h"
 }
 
 #include "debug.h"
-
-extern "C" void esp_schedule();
-extern "C" void esp_yield();
 
 // -----------------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------- Private functions ------------------------------------------------
@@ -59,7 +60,14 @@ static bool sta_config_equal(const station_config& lhs, const station_config& rh
  * @return equal
  */
 static bool sta_config_equal(const station_config& lhs, const station_config& rhs) {
-    if(strcmp(reinterpret_cast<const char*>(lhs.ssid), reinterpret_cast<const char*>(rhs.ssid)) != 0) {
+
+#if (NONOSDK >= (0x30000))
+    static_assert(sizeof(station_config) == 116, "struct station_config has changed, please update comparison function");
+#else
+    static_assert(sizeof(station_config) == 112, "struct station_config has changed, please update comparison function");
+#endif
+
+    if(strncmp(reinterpret_cast<const char*>(lhs.ssid), reinterpret_cast<const char*>(rhs.ssid), sizeof(lhs.ssid)) != 0) {
         return false;
     }
 
@@ -78,6 +86,30 @@ static bool sta_config_equal(const station_config& lhs, const station_config& rh
         }
     }
 
+    if(lhs.threshold.rssi != rhs.threshold.rssi) {
+        return false;
+    }
+
+    if(lhs.threshold.authmode != rhs.threshold.authmode) {
+        return false;
+    }
+
+#if (NONOSDK >= (0x30000))
+    if(lhs.open_and_wep_mode_disable != rhs.open_and_wep_mode_disable) {
+        return false;
+    }
+#endif
+
+#if (NONOSDK >= (0x30200))
+    if(lhs.channel != rhs.channel) {
+        return false;
+    }
+
+    if(lhs.all_channel_scan != rhs.all_channel_scan) {
+        return false;
+    }
+#endif
+
     return true;
 }
 
@@ -86,6 +118,7 @@ static bool sta_config_equal(const station_config& lhs, const station_config& rh
 // -----------------------------------------------------------------------------------------------------------------------
 
 bool ESP8266WiFiSTAClass::_useStaticIp = false;
+bool ESP8266WiFiSTAClass::_useInsecureWEP = false;
 
 /**
  * Start Wifi connection
@@ -104,21 +137,27 @@ wl_status_t ESP8266WiFiSTAClass::begin(const char* ssid, const char *passphrase,
         return WL_CONNECT_FAILED;
     }
 
-    if(!ssid || *ssid == 0x00 || strlen(ssid) > 31) {
+    if(!ssid || *ssid == 0x00 || strlen(ssid) > 32) {
         // fail SSID too long or missing!
         return WL_CONNECT_FAILED;
     }
 
-    if(passphrase && strlen(passphrase) > 64) {
+    int passphraseLen = passphrase == nullptr ? 0 : strlen(passphrase);
+    if(passphraseLen > 64) {
         // fail passphrase too long!
-        return WL_CONNECT_FAILED;
+        return WL_WRONG_PASSWORD;
     }
 
     struct station_config conf;
-    strcpy(reinterpret_cast<char*>(conf.ssid), ssid);
+    conf.threshold.authmode = (passphraseLen == 0) ? AUTH_OPEN : (_useInsecureWEP ? AUTH_WEP : AUTH_WPA_PSK);
+
+    if(strlen(ssid) == 32)
+        memcpy(reinterpret_cast<char*>(conf.ssid), ssid, 32); //copied in without null term
+    else
+        strcpy(reinterpret_cast<char*>(conf.ssid), ssid);
 
     if(passphrase) {
-        if (strlen(passphrase) == 64) // it's not a passphrase, is the PSK, which is copied into conf.password without null term
+        if (passphraseLen == 64) // it's not a passphrase, is the PSK, which is copied into conf.password without null term
             memcpy(reinterpret_cast<char*>(conf.password), passphrase, 64);
         else
             strcpy(reinterpret_cast<char*>(conf.password), passphrase);
@@ -127,9 +166,13 @@ wl_status_t ESP8266WiFiSTAClass::begin(const char* ssid, const char *passphrase,
     }
 
     conf.threshold.rssi = -127;
-
-    // TODO(#909): set authmode to AUTH_WPA_PSK if passphrase is provided
-    conf.threshold.authmode = AUTH_OPEN;
+#if (NONOSDK >= (0x30000))
+    conf.open_and_wep_mode_disable = !(_useInsecureWEP || *conf.password == 0);
+#endif
+#if (NONOSDK >= (0x30200))
+    conf.channel = channel;
+    conf.all_channel_scan = true;
+#endif
 
     if(bssid) {
         conf.bssid_set = 1;
@@ -182,6 +225,10 @@ wl_status_t ESP8266WiFiSTAClass::begin(char* ssid, char *passphrase, int32_t cha
     return begin((const char*) ssid, (const char*) passphrase, channel, bssid, connect);
 }
 
+wl_status_t ESP8266WiFiSTAClass::begin(const String& ssid, const String& passphrase, int32_t channel, const uint8_t* bssid, bool connect) {
+    return begin(ssid.c_str(), passphrase.c_str(), channel, bssid, connect);
+}
+
 /**
  * Use to connect to SDK config.
  * @return wl_status_t
@@ -211,6 +258,25 @@ wl_status_t ESP8266WiFiSTAClass::begin() {
  * @param dns1       Static DNS server 1
  * @param dns2       Static DNS server 2
  */
+
+/*
+  About the following call in the end of ESP8266WiFiSTAClass::config():
+      netif_set_addr(eagle_lwip_getif(STATION_IF), &info.ip, &info.netmask, &info.gw);
+
+  With lwip2, it is needed to trigger IP address change.
+      Recall: when lwip2 is enabled, lwip1 api is still used by espressif firmware
+          https://github.com/d-a-v/esp82xx-nonos-linklayer/tree/25d5e8186f710a230221021cba97727dbfdfd953#how-it-works
+
+  We need first to disable the lwIP API redirection for netif_set_addr() so lwip1's call will be linked:
+      https://github.com/d-a-v/esp82xx-nonos-linklayer/blob/25d5e8186f710a230221021cba97727dbfdfd953/glue-lwip/arch/cc.h#L122
+
+  We also need to declare its prototype using ip4_addr_t instead of ip_addr_t because lwIP-1.x never has IPv6.
+  No need to worry about this #undef, this call is only needed in lwip2, and never used in arduino core code.
+ */
+#undef netif_set_addr // need to call lwIP-v1.4 netif_set_addr()
+extern "C" struct netif* eagle_lwip_getif (int netif_index);
+extern "C" void netif_set_addr (struct netif* netif, ip4_addr_t* ip, ip4_addr_t* netmask, ip4_addr_t* gw);
+
 bool ESP8266WiFiSTAClass::config(IPAddress local_ip, IPAddress arg1, IPAddress arg2, IPAddress arg3, IPAddress dns2) {
 
   if(!WiFi.enableSTA(true)) {
@@ -229,28 +295,21 @@ bool ESP8266WiFiSTAClass::config(IPAddress local_ip, IPAddress arg1, IPAddress a
       return true;
   }
 
-  //To allow compatibility, check first octet of 3rd arg. If 255, interpret as ESP order, otherwise Arduino order.
-  IPAddress gateway = arg1;
-  IPAddress subnet = arg2;
-  IPAddress dns1 = arg3;
-
-  if(subnet[0] != 255)
-  {
-    //octet is not 255 => interpret as Arduino order
-    gateway = arg2;
-    subnet = arg3[0] == 0 ? IPAddress(255,255,255,0) : arg3; //arg order is arduino and 4th arg not given => assign it arduino default
-    dns1 = arg1;
-  }
-
-  //ip and gateway must be in the same subnet
-  if((local_ip & subnet) != (gateway & subnet)) {
+  IPAddress gateway, subnet, dns1;
+  if (!ipAddressReorder(local_ip, arg1, arg2, arg3, gateway, subnet, dns1))
     return false;
-  }
+
+#if !CORE_MOCK
+  // get current->previous IP address
+  // (check below)
+  struct ip_info previp;
+  wifi_get_ip_info(STATION_IF, &previp);
+#endif
 
   struct ip_info info;
-  info.ip.addr = static_cast<uint32_t>(local_ip);
-  info.gw.addr = static_cast<uint32_t>(gateway);
-  info.netmask.addr = static_cast<uint32_t>(subnet);
+  info.ip.addr = local_ip.v4();
+  info.gw.addr = gateway.v4();
+  info.netmask.addr = subnet.v4();
 
   wifi_station_dhcpc_stop();
   if(wifi_set_ip_info(STATION_IF, &info)) {
@@ -258,18 +317,62 @@ bool ESP8266WiFiSTAClass::config(IPAddress local_ip, IPAddress arg1, IPAddress a
   } else {
       return false;
   }
-  ip_addr_t d;
 
-  if(dns1 != (uint32_t)0x00000000) {
+  if(dns1.isSet()) {
       // Set DNS1-Server
-      d.addr = static_cast<uint32_t>(dns1);
-      dns_setserver(0, &d);
+      dns_setserver(0, dns1);
   }
 
-  if(dns2 != (uint32_t)0x00000000) {
+  if(dns2.isSet()) {
       // Set DNS2-Server
-      d.addr = static_cast<uint32_t>(dns2);
-      dns_setserver(1, &d);
+      dns_setserver(1, dns2);
+  }
+
+#if !CORE_MOCK
+  // trigger address change by calling lwIP-v1.4 api
+  // (see explanation above)
+  // only when ip is already set by other mean (generally dhcp)
+  if (previp.ip.addr != 0 && previp.ip.addr != info.ip.addr)
+      netif_set_addr(eagle_lwip_getif(STATION_IF), &info.ip, &info.netmask, &info.gw);
+#endif
+
+  return true;
+}
+
+bool ESP8266WiFiSTAClass::config(IPAddress local_ip, IPAddress dns) {
+
+    if (!local_ip.isSet())
+        return config(INADDR_ANY, INADDR_ANY, INADDR_ANY);
+
+    if (!local_ip.isV4())
+        return false;
+
+    IPAddress gw(local_ip);
+    gw[3] = 1;
+    if (!dns.isSet()) {
+        dns = gw;
+    }
+    return config(local_ip, dns, gw);
+}
+
+/**
+ * Change DNS for static IP configuration
+ * @param dns1       Static DNS server 1
+ * @param dns2       Static DNS server 2 (optional)
+ */
+bool ESP8266WiFiSTAClass::setDNS(IPAddress dns1, IPAddress dns2) {
+
+  if((WiFi.getMode() & WIFI_STA) == 0)
+    return false;
+
+  if(dns1.isSet()) {
+      // Set DNS1-Server
+      dns_setserver(0, dns1);
+  }
+
+  if(dns2.isSet()) {
+      // Set DNS2-Server
+      dns_setserver(1, dns2);
   }
 
   return true;
@@ -289,24 +392,48 @@ bool ESP8266WiFiSTAClass::reconnect() {
 }
 
 /**
- * Disconnect from the network
- * @param wifioff
+ * Disconnect from the network with clearing saved credentials
+ * @param wifioff Bool indicating whether STA should be disabled.
  * @return  one value of wl_status_t enum
  */
 bool ESP8266WiFiSTAClass::disconnect(bool wifioff) {
-    bool ret;
-    struct station_config conf;
-    *conf.ssid = 0;
-    *conf.password = 0;
+    // Disconnect with clearing saved credentials.
+    return disconnect(wifioff, true);
+}
 
-    ETS_UART_INTR_DISABLE();
-    if(WiFi._persistent) {
-        wifi_station_set_config(&conf);
-    } else {
-        wifi_station_set_config_current(&conf);
+/**
+ * Disconnect from the network
+ * @param wifioff Bool indicating whether STA should be disabled. 
+ * @param eraseCredentials Bool indicating whether saved credentials should be erased.
+ * @return  one value of wl_status_t enum
+ */
+bool ESP8266WiFiSTAClass::disconnect(bool wifioff, bool eraseCredentials) {
+    bool ret = false;
+
+    if (eraseCredentials) {
+        // Read current config.
+        struct station_config conf;
+        wifi_station_get_config(&conf);
+
+        // Erase credentials.
+        memset(&conf.ssid, 0, sizeof(conf.ssid));
+        memset(&conf.password, 0, sizeof(conf.password));
+
+        // Store modiffied config.
+        ETS_UART_INTR_DISABLE();
+        if(WiFi._persistent) {
+            wifi_station_set_config(&conf);
+        } else {
+            wifi_station_set_config_current(&conf);
+        }
+        ETS_UART_INTR_ENABLE();
     }
-    ret = wifi_station_disconnect();
-    ETS_UART_INTR_ENABLE();
+
+    // API Reference: wifi_station_disconnect() need to be called after system initializes and the ESP8266 Station mode is enabled.
+    if (WiFi.getMode() & WIFI_STA)
+        ret = wifi_station_disconnect();
+    else
+        ret = true;
 
     if(wifioff) {
         WiFi.enableSTA(false);
@@ -367,17 +494,22 @@ bool ESP8266WiFiSTAClass::getAutoReconnect() {
 /**
  * Wait for WiFi connection to reach a result
  * returns the status reached or disconnect if STA is off
- * @return wl_status_t
+ * @return wl_status_t or -1 on timeout
  */
-uint8_t ESP8266WiFiSTAClass::waitForConnectResult() {
+int8_t ESP8266WiFiSTAClass::waitForConnectResult(unsigned long timeoutLength) {
     //1 and 3 have STA enabled
     if((wifi_get_opmode() & 1) == 0) {
         return WL_DISCONNECTED;
     }
-    while(status() == WL_DISCONNECTED) {
-        delay(100);
+    // if probing doesn't trip, this yields
+    using oneShotYieldMs = esp8266::polledTimeout::timeoutTemplate<false, esp8266::polledTimeout::YieldPolicy::YieldOrSkip>;
+    oneShotYieldMs timeout(timeoutLength); // number of milliseconds to wait before returning timeout error
+    while(!timeout) {
+        if(status() != WL_DISCONNECTED) {
+            return status();
+        }
     }
-    return status();
+    return -1; // -1 indicates timeout
 }
 
 /**
@@ -389,7 +521,6 @@ IPAddress ESP8266WiFiSTAClass::localIP() {
     wifi_get_ip_info(STATION_IF, &ip);
     return IPAddress(ip.ip.addr);
 }
-
 
 /**
  * Get the station interface MAC address.
@@ -440,53 +571,19 @@ IPAddress ESP8266WiFiSTAClass::gatewayIP() {
  * @return IPAddress DNS Server IP
  */
 IPAddress ESP8266WiFiSTAClass::dnsIP(uint8_t dns_no) {
-#if LWIP_VERSION_MAJOR == 1
-    ip_addr_t dns_ip = dns_getserver(dns_no);
-    return IPAddress(dns_ip.addr);
-#else
-    const ip_addr_t* dns_ip = dns_getserver(dns_no);
-    return IPAddress(dns_ip->addr);
-#endif
-}
-
-
-/**
- * Get ESP8266 station DHCP hostname
- * @return hostname
- */
-String ESP8266WiFiSTAClass::hostname(void) {
-    return String(wifi_station_get_hostname());
-}
-
-
-/**
- * Set ESP8266 station DHCP hostname
- * @param aHostname max length:32
- * @return ok
- */
-bool ESP8266WiFiSTAClass::hostname(char* aHostname) {
-    if(strlen(aHostname) > 32) {
-        return false;
-    }
-    return wifi_station_set_hostname(aHostname);
+    return IPAddress(dns_getserver(dns_no));
 }
 
 /**
- * Set ESP8266 station DHCP hostname
- * @param aHostname max length:32
- * @return ok
+ * Get the broadcast ip address.
+ * @return IPAddress Broadcast IP
  */
-bool ESP8266WiFiSTAClass::hostname(const char* aHostname) {
-    return hostname((char*) aHostname);
-}
+IPAddress ESP8266WiFiSTAClass::broadcastIP()
+{
+    struct ip_info ip;
+    wifi_get_ip_info(STATION_IF, &ip);
 
-/**
- * Set ESP8266 station DHCP hostname
- * @param aHostname max length:32
- * @return ok
- */
-bool ESP8266WiFiSTAClass::hostname(String aHostname) {
-    return hostname((char*) aHostname.c_str());
+    return IPAddress(ip.ip.addr | ~(ip.netmask.addr));
 }
 
 /**
@@ -503,8 +600,9 @@ wl_status_t ESP8266WiFiSTAClass::status() {
         case STATION_NO_AP_FOUND:
             return WL_NO_SSID_AVAIL;
         case STATION_CONNECT_FAIL:
-        case STATION_WRONG_PASSWORD:
             return WL_CONNECT_FAILED;
+        case STATION_WRONG_PASSWORD:
+            return WL_WRONG_PASSWORD;
         case STATION_IDLE:
             return WL_IDLE_STATUS;
         default:
@@ -519,7 +617,10 @@ wl_status_t ESP8266WiFiSTAClass::status() {
 String ESP8266WiFiSTAClass::SSID() const {
     struct station_config conf;
     wifi_station_get_config(&conf);
-    return String(reinterpret_cast<char*>(conf.ssid));
+    char tmp[33]; //ssid can be up to 32chars, => plus null term
+    memcpy(tmp, conf.ssid, sizeof(conf.ssid));
+    tmp[32] = 0; //nullterm in case of 32 char ssid
+    return String(reinterpret_cast<char*>(tmp));
 }
 
 /**
@@ -546,6 +647,18 @@ uint8_t* ESP8266WiFiSTAClass::BSSID(void) {
 }
 
 /**
+ * Fill the current bssid / mac associated with the network if configured
+ * @param bssid  pointer to uint8_t array with length WL_MAC_ADDR_LENGTH
+ * @return bssid uint8_t *
+ */
+uint8_t* ESP8266WiFiSTAClass::BSSID(uint8_t* bssid) {
+    struct station_config conf;
+    wifi_station_get_config(&conf);
+    memcpy(bssid, conf.bssid, WL_MAC_ADDR_LENGTH);
+    return bssid;
+}
+
+/**
  * Return the current bssid / mac associated with the network if configured
  * @return String bssid mac
  */
@@ -561,7 +674,7 @@ String ESP8266WiFiSTAClass::BSSIDstr(void) {
  * Return the current network RSSI.
  * @return  RSSI value
  */
-int32_t ESP8266WiFiSTAClass::RSSI(void) {
+int8_t ESP8266WiFiSTAClass::RSSI(void) {
     return wifi_station_get_rssi();
 }
 

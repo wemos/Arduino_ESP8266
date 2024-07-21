@@ -6,10 +6,12 @@ My ESP crashes running some code. How to troubleshoot it?
 -  `Introduction <#introduction>`__
 -  `What ESP has to Say <#what-esp-has-to-say>`__
 -  `Get Your H/W Right <#get-your-hw-right>`__
+-  `Enable compilation warnings <#enable-compilation-warnings>`__
 -  `What is the Cause of Restart? <#what-is-the-cause-of-restart>`__
 -  `Exception <#exception>`__
 -  `Watchdog <#watchdog>`__
 -  `Exception Decoder <#exception-decoder>`__
+-  `Improving Exception Decoder Results <#improving-exception-decoder-results>`__
 -  `Other Common Causes for Crashes <#other-causes-for-crashes>`__
 -  `If at the Wall, Enter an Issue
    Report <#if-at-the-wall-enter-an-issue-report>`__
@@ -65,13 +67,50 @@ If you are using generic ESP modules, please follow
 `recommendations <Generic%20ESP8266%20modules>`__ on power supply and
 boot strapping resistors.
 
-For boards with integrated USB to serial converter and power supply,
+For boards with integrated USB-to-serial converter and power supply,
 usually it is enough to connect it to an USB hub that provides standard
 0.5A and is not shared with other USB devices.
 
-In any case make sure that your module is able to stable run standard
-example sketches that establish Wi-Fi connection like e.g.
+In any case, make sure that your module is able to stably run standard
+example sketches that establish Wi-Fi connection like, e.g.,
 `HelloServer.ino <https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WebServer/examples/HelloServer>`__.
+
+Enable compilation warnings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Most common issues may be resolved by enabling compilation warnings and fixing them.
+
+For Arduino IDE, select ``File -> Preferences``:
+
+- Make sure ``Show verbose output during: compilation`` is enabled
+- Set ``Compiler warnings`` to ``More`` or ``All``
+
+For PlatformIO, all warnings should already be enabled by default.
+
+Notice that the default configuration of Arduino IDE inhibits **all** compilation warnings.
+For the ESP8266 platform, some warnings should be treated as errors, otherwise it may cause unexpected issues at runtime:
+
+.. code:: cpp
+
+    int func() {
+    }
+
+    int other() {
+      return func();
+    }
+
+Should fail to build with the following message:
+
+.. code:: console
+
+    return-value.cpp: In function ‘int func()’:
+    return-value.cpp:2:1: error: no return statement in function returning non-void [-Werror=return-type]
+        2 | }
+          | ^
+    compilation terminated due to -Wfatal-errors.
+    cc1plus: some warnings being treated as errors
+
+Notice that ``-Werror=return-type`` is the default starting with Core 3.0.2 w/ GCC 10.3
 
 What is the Cause of Restart?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -82,13 +121,13 @@ is wrong, it restarts itself to tell you about it.
 
 There are two typical scenarios that trigger ESP restarts:
 
--  **Exception** - when code is performing `illegal
+-  **Exception** - when the code attempts an `illegal
    operation <../exception_causes.rst>`__,
    like trying to write to non-existent memory location.
--  **Watchdog** - if code is `locked
-   up <https://en.wikipedia.org/wiki/Watchdog_timer>`__ staying too long
-   in a loop or processing some task, so vital processes like Wi-Fi
-   communication are not able to run.
+-  **Watchdog** - if the code `locks
+   up <https://en.wikipedia.org/wiki/Watchdog_timer>`__, staying too long
+   in a loop or processing any other task without any pauses, which would
+   prevent vital processes like Wi-Fi communication from running.
 
 Please check below how to recognize `exception <#exception>`__ and
 `watchdog <#watchdog>`__ scenarios and what to do about it.
@@ -113,6 +152,10 @@ out in which line of application it is triggered. Please refer to `Check
 Where the Code Crashes <#check-where-the-code-crashes>`__ point below
 for a quick example how to do it.
 
+**NOTE:** When decoding exceptions be sure to include all lines between
+the ``---- CUT HERE ----`` marks in the output to allow the decoder to also
+provide the line of code that's actually causing the exception.
+
 Watchdog
 ^^^^^^^^
 
@@ -120,10 +163,10 @@ ESP provides two watchdog timers (wdt) that observe application for lock
 up.
 
 -  **Software Watchdog** - provided by
-   `SDK <http://bbs.espressif.com/viewforum.php?f=46>`__, that is part
+   `SDK <https://bbs.espressif.com/viewforum.php?f=46>`__, that is part
    of `esp8266 / arduino <https://github.com/esp8266/Arduino>`__ core
    loaded to module together with your application.
--  **Hardware Watchdog** - build in ESP8266 hardware and acting if
+-  **Hardware Watchdog** - built-in ESP8266 hardware, acting if the
    software watchdog is disabled for too long, in case it fails, or if
    it is not provided at all.
 
@@ -183,7 +226,7 @@ If you don't have any code for troubleshooting, use the example below:
       Serial.println();
       Serial.println("Let's provoke the s/w wdt firing...");
       //
-      // provoke an OOM, will be recorded as the last occured one
+      // provoke an OOM, will be recorded as the last occurred one
       char* out_of_memory_failure = (char*)malloc(1000000);
       //
       // wait for s/w wdt in infinite loop below
@@ -193,6 +236,7 @@ If you don't have any code for troubleshooting, use the example below:
     }
 
     void loop(){}
+
 
 Enable the Out-Of-Memory (*OOM*) debug option (in the *Tools > Debug Level*
 menu), compile/flash/upload this code to your ESP (Ctrl+U) and start Serial
@@ -228,31 +272,92 @@ Decoder <https://github.com/me-no-dev/EspExceptionDecoder>`__ you can
 track down where the module is crashing whenever you see the stack trace
 dropped. The same procedure applies to crashes caused by exceptions.
 
-    Note: To decode the exact line of code where the application
+    Note, to decode the exact line of code where the application
     crashed, you need to use ESP Exception Decoder in context of sketch
     you have just loaded to the module for diagnosis. Decoder is not
     able to correctly decode the stack trace dropped by some other
     application not compiled and loaded from your Arduino IDE.
 
 
+Improving Exception Decoder Results
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Due to the limited resources on the device, our default compiler optimizations
+focus on creating the smallest code size (``.bin`` file). The GCC compiler's
+option ``-Os`` contains the base set of optimizations used. This set is fine for
+release but not ideal for debugging.
+
+Our view of a crash is often the `Stack Dump <../Troubleshooting/stack_dump.rst>`__
+which gets copy/pasted into an Exception Decoder.
+For some situations, the optimizer doesn't write caller return addresses to the
+stack. When we crash, the list of functions called is missing. And when the
+crash occurs in a leaf function, there is seldom if ever any evidence of who
+called.
+
+With the ``-Os`` option, functions called once are inlined into the calling
+function. A chain of these functions can optimize down to the calling function.
+When the crash occurs in one of these chain functions, the actual location in
+the source code is no longer available.
+
+When you select ``Debug Optimization: Lite`` on the Arduino IDE Tools menu, it
+turns off ``optimize-sibling-calls``. Turning off this optimization allows more
+caller addresses to be written to the stack, improving the results from the
+Exception Decoder. Without this option, the callers involved in the crash may be
+missing from the Decoder results. Because of the limited stack space, there is
+the remote possibility that removing this optimization could lead to more
+frequent stack overflows. You only want to do this in a debug setting. This
+option does not help the chained function issue.
+
+When you select ``Debug Optimization: Optimum``, you get an even more complete
+stack trace. For example, chained function calls may show up. This selection
+uses the compiler option ``-Og``. GCC considers this the ideal optimization for
+the "edit-compile-debug cycle" ... "producing debuggable code." You can read the
+specifics at `GCC's Optimize Options <https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html>`__
+
+When global optimization creates build size issues or stack overflow issues,
+select ``Debug Optimization: None``, and use a targeted approach with
+``#pragma GCC optimize("Og")`` at the module level. Or, if you want to use a
+different set of optimizations, you can set optimizations through build options.
+Read more at `Global Build Options <a06-global-build-options.rst>`__.
+
+For non-Arduino IDE build platforms, you may need to research how to add build
+options. Some build platforms already use ``-Og`` for debug builds.
+
+A crash in a leaf function may not leave the caller's address on the stack.
+The return address can stay in a register for the duration of the call.
+Resulting in a crash report identifying the crashing function without a
+trace of who called. You can encourage the compiler to save the caller's
+return address by adding an inline assembly trick
+``__asm__ __volatile__("" ::: "a0", "memory");`` at the beginning of the
+function's body. Or instead, for a debug build conditional option, use the
+macro ``DEBUG_LEAF_FUNCTION()`` from ``#include <debug.h>``. For compiler
+toolchain 3.2.0 and above, the ``-Og`` option is an alternative solution.
+
+In some cases, adding ``#pragma GCC optimize("Og,no-ipa-pure-const")`` to a
+module as well as using ``DEBUG_LEAF_FUNCTION()`` in a leaf function were
+needed to display a complete call chain. Or use
+``#pragma GCC optimize("Os,no-inline,no-optimize-sibling-calls,no-ipa-pure-const")``
+if you require optimization ``-Os``.
+
+
 Other Causes for Crashes
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Interrupt Service Routines
-   By default, all functions are compiled into flash, which means that the 
-   cache may kick in for that code. However, the cache currently can't be used 
-   during hardware interrupts. That means that, if you use a hardware ISR, such as 
-   attachInterrupt(gpio, myISR, CHANGE) for a GPIO change, the ISR must have the 
-   ICACHE_RAM_ATTR attribute declared. Not only that, but the entire function tree 
-   called from the ISR must also have the ICACHE_RAM_ATTR declared.
+   By default, all functions are compiled into flash, which means that the
+   cache may kick in for that code. However, the cache currently can't be used
+   during hardware interrupts. That means that, if you use a hardware ISR, such as
+   attachInterrupt(gpio, myISR, CHANGE) for a GPIO change, the ISR must have the
+   IRAM_ATTR attribute declared. Not only that, but the entire function tree
+   called from the ISR must also have the IRAM_ATTR declared.
    Be aware that every function that has this attribute reduces available memory.
 
-   In addition, it is not possible to execute delay() or yield() from an ISR, 
+   In addition, it is not possible to execute delay() or yield() from an ISR,
    or do blocking operations, or operations that disable the interrupts, e.g.: read
    a DHT.
 
    Finally, an ISR has very high restrictions on timing for the executed code, meaning
-   that executed code should not take longer than a very few microseconds. It is 
+   that executed code should not take longer than a very few microseconds. It is
    considered best practice to set a flag within the ISR, and then from within the loop()
    check and clear that flag, and execute code.
 
@@ -261,7 +366,7 @@ Asynchronous Callbacks
    than ISRs, but some restrictions still apply.
    It is not possible to execute delay() or yield() from an asynchronous callback.
    Timing is not as tight as an ISR, but it should remain below a few milliseconds. This
-   is a guideline. The hard timing requirements depend on the WiFi configuration and 
+   is a guideline. The hard timing requirements depend on the WiFi configuration and
    amount of traffic. In general, the CPU must not be hogged by the user code, as the
    longer it is away from servicing the WiFi stack, the more likely that memory corruption
    can happen.
@@ -269,8 +374,8 @@ Asynchronous Callbacks
 Memory, memory, memory
    Running out of heap is the **most common cause for crashes**. Because the build process for
    the ESP leaves out exceptions (they use memory), memory allocations that fail will do
-   so silently. A typical example is when setting or concatenating a large String. If 
-   allocation has failed internally, then the internal string copy can corrupt data, and 
+   so silently. A typical example is when setting or concatenating a large String. If
+   allocation has failed internally, then the internal string copy can corrupt data, and
    the ESP will crash.
 
    In addition, doing many String concatenations in sequence, e.g.: using operator+()
@@ -306,11 +411,12 @@ Memory, memory, memory
    * If you use std libs like std::vector, make sure to call its ::reserve() method before filling it. This allows allocating only once, which reduces mem fragmentation, and makes sure that there are no empty unused slots left over in the container at the end.
 
 Stack
-   The amount of stack in the ESP is tiny at only 4KB. For normal developement in large systems, it 
+   The amount of stack in the ESP is tiny at only 4KB. For normal development in large systems, it
    is good practice to use and abuse the stack, because it is faster for allocation/deallocation, the scope of the object is well defined, and deallocation automatically happens in reverse order as allocation, which means no mem fragmentation. However, with the tiny amount of stack available in the ESP, that practice is not really viable, at least not for big objects.
-      * Large objects that have internally managed memory, such as String, std::string, std::vector, etc, are ok on the stack, because they internally allocate their buffers on the heap.
-      * Large arrays on the stack, such as uint8_t buffer[2048] should be avoided on the stack and be dynamically allocated (consider smart pointers).
-      * Objects that have large data members, such as large arrays, should be avoided on the stack, and be dynamicaly allocated (consider smart pointers).
+
+   * Large objects that have internally managed memory, such as String, std::string, std::vector, etc, are ok on the stack, because they internally allocate their buffers on the heap.
+   * Large arrays on the stack, such as uint8_t buffer[2048] should be avoided on the stack and should be dynamically allocated instead (consider smart pointers).
+   * Objects that have large data members, such as large arrays, should also be avoided on the stack, and should be dynamically allocated (consider smart pointers).
 
 
 If at the Wall, Enter an Issue Report
@@ -326,37 +432,38 @@ author of code in his / her repository.
 
 If there are no guidelines, include in your report the following:
 
--  [ ] Exact steps by step instructions to reproduce the issue
+-  [ ] Exact step-by-step instructions to reproduce the issue
 -  [ ] Your exact hardware configuration including the schematic
--  [ ] If the issue concerns standard, commercially available ESP board
+-  [ ] If the issue concerns a standard, commercially available ESP board
    with power supply and USB interface, without extra h/w attached, then
-   provide just the board type or link to description
+   provide just the board type or a link to its description
 -  [ ] Configuration settings in Arduino IDE used to upload the
    application
 -  [ ] Error log & messages produced by the application (enable
    debugging for more details)
 -  [ ] Decoded stack trace
 -  [ ] Copy of your sketch
--  [ ] Copy of all the libraries used by the sketch
--  [ ] If you are using standard libraries available in Library Manager,
-   then provide just version numbers
+-  [ ] Copy of all the libraries used by the sketch (if you are using
+   standard libraries available in the Arduino Library Manager,
+   then provide just version numbers)
 -  [ ] Version of `esp8266 /
    Arduino <https://github.com/esp8266/Arduino>`__ core
 -  [ ] Name and version of your programming IDE and O/S
 
 With plenty of ESP module types available, several versions of libraries
 or `esp8266 / Arduino <https://github.com/esp8266/Arduino>`__ core,
-types and versions of O/S, you need to provide exact information what
-your application is about. Only then people willing to look into your
-issue may be able to refer it to configuration they have. If you are
-lucky, they may even attempt to reproduce your issue on their equipment.
-This will be far more difficult if you are providing only vague details,
+types and versions of O/S, you need to provide exact information on what
+your application is about. Only then, people willing to look into your
+issue may be able to compare it to a configuration they are familiar with.
+If you are lucky, they may even attempt to reproduce your issue on their
+own equipment!
+This will be far more difficult if you provide only vague details,
 so somebody would need to ask you to find out what is really happening.
 
-On the other hand if you flood your issue report with hundreds lines of
-code, you may also have difficulty to find somebody willing to analyze
-it. Therefore reduce your code to the bare minimum that is still causing
-the issue. It will help you as well to isolate the issue and pin done
+On the other hand, if you flood your issue report with hundreds lines of
+code, you may also have difficulty finding somebody willing to analyze
+it. Therefore, reduce your code to the bare minimum that is still causing
+the issue. This will also help to isolate the issue and pin down
 the root cause.
 
 Conclusion
@@ -367,8 +474,8 @@ Do not be afraid to troubleshoot ESP exception and watchdog restarts.
 detailed diagnostics that will help you pin down the issue. Before
 checking the s/w, get your h/w right. Use `ESP Exception
 Decoder <https://github.com/me-no-dev/EspExceptionDecoder>`__ to find
-out where the code fails. If you do you homework and still unable to
-identify the root cause, enter the issue report. Provide enough details.
+out where the code fails. If you do you homework and are still unable to
+identify the root cause, submit an issue report. Provide enough details.
 Be specific and isolate the issue. Then ask community for support. There
 are plenty of people that like to work with ESP and willing to help with
 your problem.

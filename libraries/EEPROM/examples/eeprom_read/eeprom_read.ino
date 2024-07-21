@@ -14,10 +14,7 @@ byte value;
 
 void setup() {
   // initialize serial and wait for port to open:
-  Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for Leonardo only
-  }
+  Serial.begin(115200);
   EEPROM.begin(512);
 }
 
@@ -35,9 +32,7 @@ void loop() {
 
   // there are only 512 bytes of EEPROM, from 0 to 511, so if we're
   // on address 512, wrap around to address 0
-  if (address == 512) {
-    address = 0;
-  }
+  if (address == 512) { address = 0; }
 
   delay(500);
 }

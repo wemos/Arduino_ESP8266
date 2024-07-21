@@ -1,0 +1,44 @@
+name: Style and syntax checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+
+  # Generic formatting for Core and examples
+
+  clang-format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+    - name: Style check
+      run: |
+          sudo apt update
+          bash ./tests/ci/style_check.sh
+
+  # Validate orthography
+
+  code-spell:
+    name: codespell
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: false
+    - name: Run codespell
+      uses: codespell-project/actions-codespell@master
+      with:
+        skip: ./libraries/ESP8266SdFat,./libraries/LittleFS/lib,./tools/pyserial,./tools/sdk,./tools/esptool,./libraries/SoftwareSerial,./libraries/Ethernet,./github/workflows,./libraries/ESP8266HTTPUpdateServer/examples/SecureBearSSLUpdater/SecureBearSSLUpdater.ino,./libraries/esp8266/examples/RTCUserMemory/RTCUserMemory.ino,./libraries/esp8266/examples/StreamString/StreamString.ino,./libraries/ESP8266WiFi/examples/BearSSL_Validation/BearSSL_Validation.ino,./libraries/ESP8266WiFi/examples/BearSSL_Sessions/BearSSL_Sessions.ino,./libraries/ESP8266WebServer/examples/HelloServerBearSSL/HelloServerBearSSL.ino,./libraries/ESP8266WebServer/examples/HttpHashCredAuth/HttpHashCredAuth.ino,./cores/esp8266/spiffs,./tests/device/test_libc/libm_string.c, ./libraries/Netdump/examples/Netdump/Netdump.ino,./libraries/ESP8266WiFi/examples/BearSSL_Server,./cores/esp8266/LwipIntfDev.h
+        ignore_words_list: ESP8266,esp8266,esp,dout,DOUT,ser,ans

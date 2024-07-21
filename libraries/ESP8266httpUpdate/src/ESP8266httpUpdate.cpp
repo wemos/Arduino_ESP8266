@@ -25,9 +25,7 @@
 
 #include "ESP8266httpUpdate.h"
 #include <StreamString.h>
-
-extern "C" uint32_t _SPIFFS_start;
-extern "C" uint32_t _SPIFFS_end;
+#include <flash_hal.h>
 
 ESP8266HTTPUpdate::ESP8266HTTPUpdate(void)
         : _httpClientTimeout(8000)
@@ -43,91 +41,56 @@ ESP8266HTTPUpdate::~ESP8266HTTPUpdate(void)
 {
 }
 
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& url, const String& currentVersion,
-        const String& httpsFingerprint, bool reboot)
+/**
+ * set the Authorization for the http request
+ * @param user const String&
+ * @param password const String&
+ */
+void ESP8266HTTPUpdate::setAuthorization(const String &user, const String &password)
 {
-    rebootOnUpdate(reboot);
-    return update(url, currentVersion, httpsFingerprint);
+    _user = user;
+    _password = password;
 }
 
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& url, const String& currentVersion)
+/**
+ * set the Authorization for the http request
+ * @param auth const String& base64
+ */
+void ESP8266HTTPUpdate::setAuthorization(const String &auth)
+{
+    _auth = auth;
+}
+
+HTTPUpdateResult ESP8266HTTPUpdate::update(WiFiClient& client, const String& url, const String& currentVersion)
 {
     HTTPClient http;
-    http.begin(url);
+    http.begin(client, url);
     return handleUpdate(http, currentVersion, false);
 }
 
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& url, const String& currentVersion,
-        const String& httpsFingerprint)
+HTTPUpdateResult ESP8266HTTPUpdate::updateFS(WiFiClient& client, const String& url, const String& currentVersion)
 {
     HTTPClient http;
-    http.begin(url, httpsFingerprint);
-    return handleUpdate(http, currentVersion, false);
-}
-
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& url, const String& currentVersion,
-        const uint8_t httpsFingerprint[20])
-{
-    HTTPClient http;
-    http.begin(url, httpsFingerprint);
-    return handleUpdate(http, currentVersion, false);
-}
-
-HTTPUpdateResult ESP8266HTTPUpdate::updateSpiffs(const String& url, const String& currentVersion, const String& httpsFingerprint)
-{
-    HTTPClient http;
-    http.begin(url, httpsFingerprint);
+    http.begin(client, url);
     return handleUpdate(http, currentVersion, true);
 }
 
-HTTPUpdateResult ESP8266HTTPUpdate::updateSpiffs(const String& url, const String& currentVersion, const uint8_t httpsFingerprint[20])
-{
-    HTTPClient http;
-    http.begin(url, httpsFingerprint);
-    return handleUpdate(http, currentVersion, true);
-}
-
-HTTPUpdateResult ESP8266HTTPUpdate::updateSpiffs(const String& url, const String& currentVersion)
-{
-    HTTPClient http;
-    http.begin(url);
-    return handleUpdate(http, currentVersion, true);
-}
-
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& host, uint16_t port, const String& uri, const String& currentVersion,
-        bool https, const String& httpsFingerprint, bool reboot)
-{
-    (void)https;
-    rebootOnUpdate(reboot);
-    if (httpsFingerprint.length() == 0) {
-        return update(host, port, uri, currentVersion);
-    } else {
-        return update(host, port, uri, currentVersion, httpsFingerprint);
-    }
-}
-
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& host, uint16_t port, const String& uri,
+HTTPUpdateResult ESP8266HTTPUpdate::update(WiFiClient& client, const String& host, uint16_t port, const String& uri,
         const String& currentVersion)
 {
     HTTPClient http;
-    http.begin(host, port, uri);
+    http.begin(client, host, port, uri);
     return handleUpdate(http, currentVersion, false);
 }
 
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& host, uint16_t port, const String& url,
-        const String& currentVersion, const String& httpsFingerprint)
+HTTPUpdateResult ESP8266HTTPUpdate::update(HTTPClient& httpClient, const String& currentVersion)
 {
-    HTTPClient http;
-    http.begin(host, port, url, httpsFingerprint);
-    return handleUpdate(http, currentVersion, false);
+    return handleUpdate(httpClient, currentVersion, false);
 }
 
-HTTPUpdateResult ESP8266HTTPUpdate::update(const String& host, uint16_t port, const String& url,
-        const String& currentVersion, const uint8_t httpsFingerprint[20])
+HTTPUpdateResult ESP8266HTTPUpdate::updateFS(HTTPClient& httpClient, const String& currentVersion)
 {
-    HTTPClient http;
-    http.begin(host, port, url, httpsFingerprint);
-    return handleUpdate(http, currentVersion, false);
+    return handleUpdate(httpClient, currentVersion, true);
 }
 
 /**
@@ -180,6 +143,8 @@ String ESP8266HTTPUpdate::getLastErrorString(void)
         return F("Verify Bin Header Failed");
     case HTTP_UE_BIN_FOR_WRONG_FLASH:
         return F("New Binary Does Not Fit Flash Size");
+    case HTTP_UE_SERVER_UNAUTHORIZED:
+        return F("Unauthorized (401)");
     }
 
     return String();
@@ -200,7 +165,9 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
     // use HTTP/1.0 for update since the update handler not support any transfer Encoding
     http.useHTTP10(true);
     http.setTimeout(_httpClientTimeout);
+    http.setFollowRedirects(_followRedirects);
     http.setUserAgent(F("ESP8266-http-Update"));
+    http.addHeader(F("x-ESP8266-Chip-ID"), String(ESP.getChipId()));
     http.addHeader(F("x-ESP8266-STA-MAC"), WiFi.macAddress());
     http.addHeader(F("x-ESP8266-AP-MAC"), WiFi.softAPmacAddress());
     http.addHeader(F("x-ESP8266-free-space"), String(ESP.getFreeSketchSpace()));
@@ -219,6 +186,16 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
         http.addHeader(F("x-ESP8266-version"), currentVersion);
     }
 
+    if (!_user.isEmpty() && !_password.isEmpty())
+    {
+        http.setAuthorization(_user.c_str(), _password.c_str());
+    }
+
+    if (!_auth.isEmpty())
+    {
+        http.setAuthorization(_auth.c_str());
+    }
+
     const char * headerkeys[] = { "x-MD5" };
     size_t headerkeyssize = sizeof(headerkeys) / sizeof(char*);
 
@@ -231,7 +208,7 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
 
     if(code <= 0) {
         DEBUG_HTTP_UPDATE("[httpUpdate] HTTP error: %s\n", http.errorToString(code).c_str());
-        _lastError = code;
+        _setLastError(code);
         http.end();
         return HTTP_UPDATE_FAILED;
     }
@@ -241,14 +218,24 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
     DEBUG_HTTP_UPDATE("[httpUpdate] Server header:\n");
     DEBUG_HTTP_UPDATE("[httpUpdate]  - code: %d\n", code);
     DEBUG_HTTP_UPDATE("[httpUpdate]  - len: %d\n", len);
+    if(code != HTTP_CODE_OK) {
+        DEBUG_HTTP_UPDATE("[httpUpdate]  - payload: %s\n", http.getString().c_str());
+    }
 
-    if(http.hasHeader("x-MD5")) {
-        DEBUG_HTTP_UPDATE("[httpUpdate]  - MD5: %s\n", http.header("x-MD5").c_str());
+    String md5;
+    if (_md5Sum.length()) {
+        md5 = _md5Sum; 
+    } else if(http.hasHeader("x-MD5")) {
+        md5 = http.header("x-MD5");
+    }
+    if(md5.length()) {
+        DEBUG_HTTP_UPDATE("[httpUpdate]  - MD5: %s\n", md5.c_str());
     }
 
     DEBUG_HTTP_UPDATE("[httpUpdate] ESP8266 info:\n");
     DEBUG_HTTP_UPDATE("[httpUpdate]  - free Space: %d\n", ESP.getFreeSketchSpace());
     DEBUG_HTTP_UPDATE("[httpUpdate]  - current Sketch Size: %d\n", ESP.getSketchSize());
+    DEBUG_HTTP_UPDATE("[httpUpdate]  - current Sketch MD5: %s\n", ESP.getSketchMD5().c_str());
 
     if(currentVersion && currentVersion[0] != 0x00) {
         DEBUG_HTTP_UPDATE("[httpUpdate]  - current version: %s\n", currentVersion.c_str() );
@@ -259,7 +246,7 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
         if(len > 0) {
             bool startUpdate = true;
             if(spiffs) {
-                size_t spiffsSize = ((size_t) &_SPIFFS_end - (size_t) &_SPIFFS_start);
+                size_t spiffsSize = ((size_t)FS_end - (size_t)FS_start);
                 if(len > (int) spiffsSize) {
                     DEBUG_HTTP_UPDATE("[httpUpdate] spiffsSize to low (%d) needed: %d\n", spiffsSize, len);
                     startUpdate = false;
@@ -271,23 +258,35 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
                 }
             }
 
-            if(!startUpdate) {
-                _lastError = HTTP_UE_TOO_LESS_SPACE;
+            if (!startUpdate) {
+                _setLastError(HTTP_UE_TOO_LESS_SPACE);
                 ret = HTTP_UPDATE_FAILED;
             } else {
+                // Warn main app we're starting up...
+                if (_cbStart) {
+                    _cbStart();
+                }
 
                 WiFiClient * tcp = http.getStreamPtr();
+                if (!tcp) {
+                    DEBUG_HTTP_UPDATE("[httpUpdate] WiFiClient connection unexpectedly absent\n");
+                    _setLastError(HTTPC_ERROR_CONNECTION_LOST);
+                    http.end();
+                    return HTTP_UPDATE_FAILED;
+                }
 
-                WiFiUDP::stopAll();
-                WiFiClient::stopAllExcept(tcp);
+                if (_closeConnectionsOnUpdate) {
+                    WiFiUDP::stopAll();
+                    WiFiClient::stopAllExcept(tcp);
+                }
 
                 delay(100);
 
                 int command;
 
                 if(spiffs) {
-                    command = U_SPIFFS;
-                    DEBUG_HTTP_UPDATE("[httpUpdate] runUpdate spiffs...\n");
+                    command = U_FS;
+                    DEBUG_HTTP_UPDATE("[httpUpdate] runUpdate filesystem...\n");
                 } else {
                     command = U_FLASH;
                     DEBUG_HTTP_UPDATE("[httpUpdate] runUpdate flash...\n");
@@ -297,37 +296,50 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
                     uint8_t buf[4];
                     if(tcp->peekBytes(&buf[0], 4) != 4) {
                         DEBUG_HTTP_UPDATE("[httpUpdate] peekBytes magic header failed\n");
-                        _lastError = HTTP_UE_BIN_VERIFY_HEADER_FAILED;
+                        _setLastError(HTTP_UE_BIN_VERIFY_HEADER_FAILED);
                         http.end();
                         return HTTP_UPDATE_FAILED;
                     }
 
                     // check for valid first magic byte
-                    if(buf[0] != 0xE9) {
+                    if(buf[0] != 0xE9 && buf[0] != 0x1f) {
                         DEBUG_HTTP_UPDATE("[httpUpdate] Magic header does not start with 0xE9\n");
-                        _lastError = HTTP_UE_BIN_VERIFY_HEADER_FAILED;
+                        _setLastError(HTTP_UE_BIN_VERIFY_HEADER_FAILED);
                         http.end();
                         return HTTP_UPDATE_FAILED;
 
                     }
 
-                    uint32_t bin_flash_size = ESP.magicFlashChipSize((buf[3] & 0xf0) >> 4);
+// it makes no sense to check flash size in auto flash mode
+// (sketch size would have to be set in bin header, instead of flash size)
+#if !FLASH_MAP_SUPPORT
+                    if (buf[0] == 0xe9) {
+                        uint32_t bin_flash_size = ESP.magicFlashChipSize((buf[3] & 0xf0) >> 4);
 
-                    // check if new bin fits to SPI flash
-                    if(bin_flash_size > ESP.getFlashChipRealSize()) {
-                        DEBUG_HTTP_UPDATE("[httpUpdate] New binary does not fit SPI Flash size\n");
-                        _lastError = HTTP_UE_BIN_FOR_WRONG_FLASH;
-                        http.end();
-                        return HTTP_UPDATE_FAILED;
+                        // check if new bin fits to SPI flash
+                        if(bin_flash_size > ESP.getFlashChipRealSize()) {
+                            DEBUG_HTTP_UPDATE("[httpUpdate] New binary does not fit SPI Flash size\n");
+                            _setLastError(HTTP_UE_BIN_FOR_WRONG_FLASH);
+                            http.end();
+                            return HTTP_UPDATE_FAILED;
+                        }
                     }
+#endif
                 }
-
-                if(runUpdate(*tcp, len, http.header("x-MD5"), command)) {
+                if(runUpdate(*tcp, len, md5, command)) {
                     ret = HTTP_UPDATE_OK;
                     DEBUG_HTTP_UPDATE("[httpUpdate] Update ok\n");
                     http.end();
+                    // Warn main app we're all done
+                    if (_cbEnd) {
+                        _cbEnd();
+                    }
 
+#ifdef ATOMIC_FS_UPDATE
+                    if(_rebootOnUpdate) {
+#else
                     if(_rebootOnUpdate && !spiffs) {
+#endif
                         ESP.restart();
                     }
 
@@ -337,7 +349,7 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
                 }
             }
         } else {
-            _lastError = HTTP_UE_SERVER_NOT_REPORT_SIZE;
+            _setLastError(HTTP_UE_SERVER_NOT_REPORT_SIZE);
             ret = HTTP_UPDATE_FAILED;
             DEBUG_HTTP_UPDATE("[httpUpdate] Content-Length was 0 or wasn't set by Server?!\n");
         }
@@ -347,15 +359,19 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
         ret = HTTP_UPDATE_NO_UPDATES;
         break;
     case HTTP_CODE_NOT_FOUND:
-        _lastError = HTTP_UE_SERVER_FILE_NOT_FOUND;
+        _setLastError(HTTP_UE_SERVER_FILE_NOT_FOUND);
         ret = HTTP_UPDATE_FAILED;
         break;
     case HTTP_CODE_FORBIDDEN:
-        _lastError = HTTP_UE_SERVER_FORBIDDEN;
+        _setLastError(HTTP_UE_SERVER_FORBIDDEN);
+        ret = HTTP_UPDATE_FAILED;
+        break;
+    case HTTP_CODE_UNAUTHORIZED:
+        _setLastError(HTTP_UE_SERVER_UNAUTHORIZED);
         ret = HTTP_UPDATE_FAILED;
         break;
     default:
-        _lastError = HTTP_UE_SERVER_WRONG_HTTP_CODE;
+        _setLastError(HTTP_UE_SERVER_WRONG_HTTP_CODE);
         ret = HTTP_UPDATE_FAILED;
         DEBUG_HTTP_UPDATE("[httpUpdate] HTTP Code is (%d)\n", code);
         //http.writeToStream(&Serial1);
@@ -373,37 +389,49 @@ HTTPUpdateResult ESP8266HTTPUpdate::handleUpdate(HTTPClient& http, const String&
  * @param md5 String
  * @return true if Update ok
  */
-bool ESP8266HTTPUpdate::runUpdate(Stream& in, uint32_t size, String md5, int command)
+bool ESP8266HTTPUpdate::runUpdate(Stream& in, uint32_t size, const String& md5, int command)
 {
 
     StreamString error;
 
-    if(!Update.begin(size, command)) {
-        _lastError = Update.getError();
+    if (_cbProgress) {
+        Update.onProgress(_cbProgress);
+    }
+
+    if(!Update.begin(size, command, _ledPin, _ledOn)) {
+        _setLastError(Update.getError());
         Update.printError(error);
         error.trim(); // remove line ending
         DEBUG_HTTP_UPDATE("[httpUpdate] Update.begin failed! (%s)\n", error.c_str());
         return false;
     }
 
+    if (_cbProgress) {
+        _cbProgress(0, size);
+    }
+
     if(md5.length()) {
         if(!Update.setMD5(md5.c_str())) {
-            _lastError = HTTP_UE_SERVER_FAULTY_MD5;
+            _setLastError(HTTP_UE_SERVER_FAULTY_MD5);
             DEBUG_HTTP_UPDATE("[httpUpdate] Update.setMD5 failed! (%s)\n", md5.c_str());
             return false;
         }
     }
 
     if(Update.writeStream(in) != size) {
-        _lastError = Update.getError();
+        _setLastError(Update.getError());
         Update.printError(error);
         error.trim(); // remove line ending
         DEBUG_HTTP_UPDATE("[httpUpdate] Update.writeStream failed! (%s)\n", error.c_str());
         return false;
     }
 
+    if (_cbProgress) {
+        _cbProgress(size, size);
+    }
+
     if(!Update.end()) {
-        _lastError = Update.getError();
+        _setLastError(Update.getError());
         Update.printError(error);
         error.trim(); // remove line ending
         DEBUG_HTTP_UPDATE("[httpUpdate] Update.end failed! (%s)\n", error.c_str());
@@ -411,6 +439,115 @@ bool ESP8266HTTPUpdate::runUpdate(Stream& in, uint32_t size, String md5, int com
     }
 
     return true;
+}
+
+/**
+ * @brief  Get avialable firmware version from update server
+ * @author Holger Mueller
+ * @date   2023-08-03
+ * 
+ * @param  client WiFiClient to use (see HTTPClient::begin)
+ * @param  host Update host name or IP (see HTTPClient::begin)
+ * @param  port Port on host (see HTTPClient::begin)
+ * @param  uri Update URI on server (see HTTPClient::begin)
+ * @param  current_version Current firmware version
+ * @param  available_version Firmware version available on update server
+ * @return ESP8266HTTPUpdate::HTTPUpdateResult, HTTP_UPDATE_OK in case of success
+ */
+HTTPUpdateResult ESP8266HTTPUpdate::getAvailableVersion(WiFiClient& client, const String& host, uint16_t port, const String& uri, const String& current_version, String& available_version) {
+    HTTPUpdateResult ret = HTTP_UPDATE_FAILED;
+    HTTPClient http;
+    http.begin(client, host, port, uri);
+
+    // use HTTP/1.0 for update since the update handler not support any transfer Encoding
+    http.useHTTP10(true);
+    http.setTimeout(_httpClientTimeout);
+    http.setFollowRedirects(_followRedirects);
+    http.setUserAgent(F("ESP8266-http-Update"));
+    http.addHeader(F("x-ESP8266-Chip-ID"), String(ESP.getChipId()));
+    http.addHeader(F("x-ESP8266-STA-MAC"), WiFi.macAddress());
+    http.addHeader(F("x-ESP8266-AP-MAC"), WiFi.softAPmacAddress());
+    http.addHeader(F("x-ESP8266-free-space"), String(ESP.getFreeSketchSpace()));
+    http.addHeader(F("x-ESP8266-sketch-size"), String(ESP.getSketchSize()));
+    http.addHeader(F("x-ESP8266-sketch-md5"), String(ESP.getSketchMD5()));
+    http.addHeader(F("x-ESP8266-chip-size"), String(ESP.getFlashChipRealSize()));
+    http.addHeader(F("x-ESP8266-sdk-version"), ESP.getSdkVersion());
+
+    http.addHeader(F("x-ESP8266-mode"), F("version"));
+
+    if (current_version && current_version[0] != 0x00) {
+        http.addHeader(F("x-ESP8266-version"), current_version);
+    }
+
+    if (!_user.isEmpty() && !_password.isEmpty()) {
+        http.setAuthorization(_user.c_str(), _password.c_str());
+    }
+
+    if (!_auth.isEmpty()) {
+        http.setAuthorization(_auth.c_str());
+    }
+
+    const char* headerkeys[] = {"x-MD5", "x-version"};
+    size_t headerkeyssize = sizeof(headerkeys) / sizeof(char*);
+
+    // track these headers
+    http.collectHeaders(headerkeys, headerkeyssize);
+
+    int code = http.GET();
+
+    if (code <= 0) {
+        DEBUG_HTTP_UPDATE("[httpUpdate] HTTP error: %s\n", http.errorToString(code).c_str());
+        _setLastError(code);
+        http.end();
+        return HTTP_UPDATE_FAILED;
+    }
+
+    DEBUG_HTTP_UPDATE("[httpUpdate] Header read fin.\n");
+    DEBUG_HTTP_UPDATE("[httpUpdate] Server header:\n");
+    DEBUG_HTTP_UPDATE("[httpUpdate]  - code: %d\n", code);
+    DEBUG_HTTP_UPDATE("[httpUpdate]  - len: %d\n", http.getSize());
+    if (code != HTTP_CODE_OK) {
+        DEBUG_HTTP_UPDATE("[httpUpdate]  - payload: %s\n", http.getString().c_str());
+    }
+
+    switch (code) {
+    case HTTP_CODE_OK:  ///< OK (check for version)
+        if (http.hasHeader("x-version")) {
+            available_version = http.header("x-version");
+            ret = HTTP_UPDATE_OK;
+            DEBUG_HTTP_UPDATE("[httpUpdate]  - current version: %s\n", current_version.c_str());
+            DEBUG_HTTP_UPDATE("[httpUpdate]  - server  version: %s\n", available_version.c_str());
+        } else {
+            _setLastError(HTTP_UE_SERVER_NOT_REPORT_VERSION);
+            ret = HTTP_UPDATE_FAILED;
+            DEBUG_HTTP_UPDATE("[httpUpdate] Server did not respond with a firmware version\n");
+        }
+        if (http.hasHeader("x-MD5")) {
+            DEBUG_HTTP_UPDATE("[httpUpdate]  - current Sketch MD5: %s\n", ESP.getSketchMD5().c_str());
+            DEBUG_HTTP_UPDATE("[httpUpdate]  - server  Sketch MD5: %s\n", http.header("x-MD5").c_str());
+        }
+        break;
+    case HTTP_CODE_NOT_FOUND:
+        _setLastError(HTTP_UE_SERVER_FILE_NOT_FOUND);
+        ret = HTTP_UPDATE_FAILED;
+        break;
+    case HTTP_CODE_FORBIDDEN:
+        _setLastError(HTTP_UE_SERVER_FORBIDDEN);
+        ret = HTTP_UPDATE_FAILED;
+        break;
+    case HTTP_CODE_UNAUTHORIZED:
+        _setLastError(HTTP_UE_SERVER_UNAUTHORIZED);
+        ret = HTTP_UPDATE_FAILED;
+        break;
+    default:
+        _setLastError(HTTP_UE_SERVER_WRONG_HTTP_CODE);
+        ret = HTTP_UPDATE_FAILED;
+        DEBUG_HTTP_UPDATE("[httpUpdate] HTTP Code is (%d)\n", code);
+        break;
+    }
+
+    http.end();
+    return ret;
 }
 
 #if !defined(NO_GLOBAL_INSTANCES) && !defined(NO_GLOBAL_HTTPUPDATE)

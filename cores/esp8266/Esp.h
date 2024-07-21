@@ -22,9 +22,11 @@
 #define ESP_H
 
 #include <Arduino.h>
+#include "core_esp8266_features.h"
+#include "spi_vendors.h"
 
 /**
- * AVR macros for WDT managment
+ * AVR macros for WDT management
  */
 typedef enum {
     WDTO_0MS    = 0,   //!< WDTO_0MS
@@ -85,81 +87,201 @@ typedef enum {
 class EspClass {
     public:
         // TODO: figure out how to set WDT timeout
-        void wdtEnable(uint32_t timeout_ms = 0);
+        static void wdtEnable(uint32_t timeout_ms = 0);
         // note: setting the timeout value is not implemented at the moment
-        void wdtEnable(WDTO_t timeout_ms = WDTO_0MS);
+        static void wdtEnable(WDTO_t timeout_ms = WDTO_0MS);
 
-        void wdtDisable();
-        void wdtFeed();
+        static void wdtDisable();
+        static void wdtFeed();
 
-        void deepSleep(uint64_t time_us, RFMode mode = RF_DEFAULT);
-        void deepSleepInstant(uint64_t time_us, RFMode mode = RF_DEFAULT);
-        uint64_t deepSleepMax();
+        static void deepSleep(uint64_t time_us, RFMode mode = RF_DEFAULT);
+        static void deepSleepInstant(uint64_t time_us, RFMode mode = RF_DEFAULT);
+        static uint64_t deepSleepMax();
 
-        bool rtcUserMemoryRead(uint32_t offset, uint32_t *data, size_t size);
-        bool rtcUserMemoryWrite(uint32_t offset, uint32_t *data, size_t size);
+        static bool rtcUserMemoryRead(uint32_t offset, uint32_t *data, size_t size);
+        static bool rtcUserMemoryWrite(uint32_t offset, uint32_t *data, size_t size);
 
-        void reset();
-        void restart();
+        static void reset();
+        static void restart();
+        /**
+         * @brief When calling this method the ESP8266 reboots into the UART download mode without
+         * the need of any external wiring. This is the same mode which can also be entered by
+         * pulling GPIO0=low, GPIO2=high, GPIO15=low and resetting the ESP8266.
+         */
+        [[noreturn]] static void rebootIntoUartDownloadMode();
 
-        uint16_t getVcc();
-        uint32_t getChipId();
+        static uint16_t getVcc();
+        static uint32_t getChipId();
 
-        uint32_t getFreeHeap();
-        uint16_t getMaxFreeBlockSize();
-        uint8_t getHeapFragmentation(); // in %
-        void getHeapStats(uint32_t* free = nullptr, uint16_t* max = nullptr, uint8_t* frag = nullptr);
+        static uint32_t getFreeHeap();
+#if defined(UMM_INFO)
+        static uint32_t getMaxFreeBlockSize();
+        static uint8_t getHeapFragmentation(); // in %
+        static void getHeapStats(uint32_t* free = nullptr, uint16_t* max = nullptr, uint8_t* frag = nullptr) __attribute__((deprecated("Use 'uint32_t*' on max, 2nd argument")));
+        static void getHeapStats(uint32_t* free = nullptr, uint32_t* max = nullptr, uint8_t* frag = nullptr);
+#endif
+        static uint32_t getFreeContStack();
+        static void resetFreeContStack();
 
-        uint32_t getFreeContStack();
+        static const char * getSdkVersion();
+        static String getCoreVersion();
+        static String getFullVersion();
 
-        const char * getSdkVersion();
-        String getCoreVersion();
-        String getFullVersion();
+        static uint8_t getBootVersion();
+        static uint8_t getBootMode();
 
-        uint8_t getBootVersion();
-        uint8_t getBootMode();
+#if defined(F_CPU) || defined(CORE_MOCK)
+        constexpr
+#endif
+            static inline uint8_t getCpuFreqMHz() __attribute__((always_inline))
+        {
+            return esp_get_cpu_freq_mhz();
+        }
 
-        uint8_t getCpuFreqMHz();
+        static uint32_t getFlashChipId();
+        static uint8_t getFlashChipVendorId();
 
-        uint32_t getFlashChipId();
         //gets the actual chip size based on the flash id
-        uint32_t getFlashChipRealSize();
+        static uint32_t getFlashChipRealSize();
         //gets the size of the flash as set by the compiler
-        uint32_t getFlashChipSize();
-        uint32_t getFlashChipSpeed();
-        FlashMode_t getFlashChipMode();
-        uint32_t getFlashChipSizeByChipId();
+        static uint32_t getFlashChipSize();
+        static uint32_t getFlashChipSpeed();
+        static FlashMode_t getFlashChipMode();
+        static uint32_t getFlashChipSizeByChipId();
 
-        uint32_t magicFlashChipSize(uint8_t byte);
-        uint32_t magicFlashChipSpeed(uint8_t byte);
-        FlashMode_t magicFlashChipMode(uint8_t byte);
+        static uint32_t magicFlashChipSize(uint8_t byte);
+        static uint32_t magicFlashChipSpeed(uint8_t byte);
+        static FlashMode_t magicFlashChipMode(uint8_t byte);
 
-        bool checkFlashConfig(bool needsEquals = false);
+        static bool checkFlashConfig(bool needsEquals = false);
 
-        bool flashEraseSector(uint32_t sector);
-        bool flashWrite(uint32_t offset, uint32_t *data, size_t size);
-        bool flashRead(uint32_t offset, uint32_t *data, size_t size);
+        static bool checkFlashCRC();
 
-        uint32_t getSketchSize();
-        String getSketchMD5();
-        uint32_t getFreeSketchSpace();
-        bool updateSketch(Stream& in, uint32_t size, bool restartOnFail = false, bool restartOnSuccess = true);
+        static bool flashEraseSector(uint32_t sector);
+        /**
+         * @brief Write @a size bytes from @a data to flash at @a address
+         * This overload requires @a data and @a size to be always 4 byte aligned and
+         * @a address to be 4 byte aligned if the write crossess page boundary,
+         * but guarantees no overhead (except on PUYA flashes)
+         * @param address address on flash where write should start, 4 byte alignment is conditional
+         * @param data input buffer, must be 4-byte aligned
+         * @param size amount of data, must be a multiple of 4
+         * @return bool result of operation
+         * @retval true success
+         * @retval false failure to write to flash or incorrect alignment of params
+         */
+        static bool flashWrite(uint32_t address, const uint32_t *data, size_t size);
+        /**
+         * @brief Write @a size bytes from @a data to flash at @a address
+         * This overload handles all misalignment cases
+         * @param address address on flash where write should start
+         * @param data input buffer, passing unaligned memory will cause significant stack usage
+         * @param size amount of data, passing not multiple of 4 will cause additional reads and writes
+         * @return bool result of operation
+         */
+        static bool flashWrite(uint32_t address, const uint8_t *data, size_t size);
+        /**
+         * @brief Read @a size bytes to @a data to flash at @a address
+         * This overload requires @a data and @a size to be 4 byte aligned
+         * @param address address on flash where read should start
+         * @param data input buffer, must be 4-byte aligned
+         * @param size amount of data, must be a multiple of 4
+         * @return bool result of operation
+         * @retval true success
+         * @retval false failure to read from flash or incorrect alignment of params
+         */
+        static bool flashRead(uint32_t address, uint32_t *data, size_t size);
+        /**
+         * @brief Read @a size bytes to @a data to flash at @a address
+         * This overload handles all misalignment cases
+         * @param address address on flash where read should start
+         * @param data input buffer, passing unaligned memory will cause significant stack usage
+         * @param size amount of data, passing not multiple of 4 will cause additional read
+         * @return bool result of operation
+         */
+        static bool flashRead(uint32_t address, uint8_t *data, size_t size);
 
-        String getResetReason();
-        String getResetInfo();
-        struct rst_info * getResetInfoPtr();
+        static uint32_t getSketchSize();
+        static String getSketchMD5();
+        static uint32_t getFreeSketchSpace();
+        static bool updateSketch(Stream& in, uint32_t size, bool restartOnFail = false, bool restartOnSuccess = true);
 
-        bool eraseConfig();
+        static String getResetReason();
+        static String getResetInfo();
+        static struct rst_info * getResetInfoPtr();
 
-        inline uint32_t getCycleCount();
+        static bool eraseConfig();
+
+        /**
+         * @brief Erases 4 sectors at the end of flash, 1 - RF_CAL and 3 - SYSTEMPARM.
+         * These are the same additional sectors that are erase when you select
+         * Erase Flash: "Sketch + WiFi Settings" from the Arduino IDE Tools menu.
+         *
+         * This operation erases the running SDK's flash configuration space.
+         * As a precaution before calling, first call "WiFi.mode(WIFI_OFF)."
+         *
+         * If you need to erase "WiFi Settings" and reboot consider using
+         * "ArduinoOTA.eraseConfigAndReset()" it handles shutting down WiFi
+         * before the erase.
+         * @return bool result of operation. Always False on return.
+         * Function does not return on success.
+         */
+        static bool eraseConfigAndReset();
+
+        static uint8_t *random(uint8_t *resultArray, const size_t outputSizeBytes);
+        static uint32_t random();
+
+#if !defined(CORE_MOCK)
+        static inline uint32_t getCycleCount() __attribute__((always_inline))
+        {
+            return esp_get_cycle_count();
+        }
+#else
+        static uint32_t getCycleCount();
+#endif // !defined(CORE_MOCK)
+        /**
+         * @brief Push current Heap selection and set Heap selection to DRAM.
+         *
+         * @param none
+         * @return none
+         */
+        static void setDramHeap();
+        /**
+         * @brief Push current Heap selection and set Heap selection to IRAM.
+         *
+         * @param none
+         * @return none
+         */
+        static void setIramHeap();
+        /**
+         * @brief Push current Heap selection and set Heap selection to External. (Experimental)
+         *
+         * @param none
+         * @return none
+         */
+        static void setExternalHeap();
+        /**
+         * @brief Restores Heap selection back to value present when
+         * setDramHeap, setIramHeap, or setExternalHeap was called.
+         *
+         * @param none
+         * @return none
+         */
+        static void resetHeap();
+    private:
+        /**
+         * @brief Write up to @a size bytes from @a data to flash at @a address
+         * This function handles all cases of unaligned memory acccess; when either
+         * address is not aligned, data pointer is not aligned or size is not a multiple of 4.
+         * User of this function should note that @a data will be copied into a buffer allocated on stack.
+         *
+         * @param address address on flash where write should start
+         * @param data input buffer
+         * @param size amount of data
+         * @return size_t amount of data written, 0 on failure
+         */
+        static size_t flashWriteUnalignedMemory(uint32_t address, const uint8_t *data, size_t size);
 };
-
-uint32_t EspClass::getCycleCount()
-{
-    uint32_t ccount;
-    __asm__ __volatile__("esync; rsr %0,ccount":"=a" (ccount));
-    return ccount;
-}
 
 extern EspClass ESP;
 

@@ -1,6 +1,15 @@
 /* This linker script generated from xt-genldscripts.tpp for LSP . */
 /* Linker Script for ld -N */
 
+/* The restriction to one MEMORY command, appears to be a restriction in
+   past versions. https://stackoverflow.com/a/55673816
+   This 2nd MEMORY command appears to work fine.
+*/
+MEMORY
+{
+  iram1_0_seg :                         org = 0x40100000, len = MMU_IRAM_SIZE
+}
+
 PHDRS
 {
   dport0_0_phdr PT_LOAD;
@@ -88,50 +97,13 @@ SECTIONS
   {
     *(.noinit)
   } >dram0_0_seg :dram0_0_phdr
-  
+
 #ifdef VTABLES_IN_DRAM
 #include "eagle.app.v6.common.ld.vtables.h"
 #endif
 
-  .irom0.text : ALIGN(4)
-  {
-    _irom0_text_start = ABSOLUTE(.);
-    *(.ver_number)
-    *.c.o( EXCLUDE_FILE (umm_malloc.c.o) .literal*, EXCLUDE_FILE (umm_malloc.c.o) .text* )
-    *.cpp.o(.literal*, .text*)
-#ifdef VTABLES_IN_FLASH
-    *(.rodata._ZTV*) /* C++ vtables */
-#endif
-    *libc.a:(.literal .text .literal.* .text.*)
-    *libm.a:(.literal .text .literal.* .text.*)
-    *libgcc.a:_umoddi3.o(.literal .text)
-    *libgcc.a:_udivdi3.o(.literal .text)
-    *libsmartconfig.a:(.literal .text .literal.* .text.*)
-    *libstdc++.a:(.literal .text .literal.* .text.*)
-    *liblwip_gcc.a:(.literal .text .literal.* .text.*)
-    *liblwip_src.a:(.literal .text .literal.* .text.*)
-    *liblwip2.a:(.literal .text .literal.* .text.*)
-    *liblwip2_1460.a:(.literal .text .literal.* .text.*)
-    *libbearssl.a:(.literal .text .literal.* .text.*)
-    *libaxtls.a:(.literal .text .literal.* .text.*)
-    *libat.a:(.literal.* .text.*)
-    *libcrypto.a:(.literal.* .text.*)
-    *libespnow.a:(.literal.* .text.*)
-    *libjson.a:(.literal.* .text.*)
-    *liblwip.a:(.literal.* .text.*)
-    *libmesh.a:(.literal.* .text.*)
-    *libnet80211.a:(.literal.* .text.*)
-    *libsmartconfig.a:(.literal.* .text.*)
-    *libssl.a:(.literal.* .text.*)
-    *libupgrade.a:(.literal.* .text.*)
-    *libwpa.a:(.literal.* .text.*)
-    *libwpa2.a:(.literal.* .text.*)
-    *libwps.a:(.literal.* .text.*)
-    *(.irom0.literal .irom.literal .irom.text.literal .irom0.text .irom0.text.* .irom.text .irom.text.*)
-    _irom0_text_end = ABSOLUTE(.);
-    _flash_code_end = ABSOLUTE(.);
-  } >irom0_0_seg :irom0_0_phdr
-
+  /* IRAM is split into .text and .text1 to allow for moving specific */
+  /* functions into IRAM that would be matched by the irom0.text matcher */
   .text : ALIGN(4)
   {
     _stext = .;
@@ -163,9 +135,144 @@ SECTIONS
     *(.entry.text)
     *(.init.literal)
     *(.init)
-    *(.literal .text .literal.* .text.* .stub .gnu.warning .gnu.linkonce.literal.* .gnu.linkonce.t.*.literal .gnu.linkonce.t.*)
-    *.cpp.o(.iram.text .iram.text.*)
-    *.c.o(.iram.text .iram.text.*)
+
+    *(.text.app_entry*)  /* The main startup code */
+
+    *(.text.gdbstub* .text.gdb_init)    /* Any GDB hooks */
+
+    /* all functional callers are placed in IRAM (including SPI/IRQ callbacks/etc) here */
+    *(.text._ZNKSt8functionIF*EE*)  /* std::function<any(...)>::operator()() const */
+
+#ifdef FP_IN_IRAM
+    *libgcc.a:*f2.o(.literal .text)
+    *libgcc.a:*f3.o(.literal .text)
+    *libgcc.a:*fsi.o(.literal .text)
+    *libgcc.a:*fdi.o(.literal .text)
+    *libgcc.a:*ifs.o(.literal .text)
+    *libgcc.a:*idf.o(.literal .text)
+#endif
+
+  } >iram1_0_seg :iram1_0_phdr
+
+  .irom0.text : ALIGN(4)
+  {
+    _irom0_text_start = ABSOLUTE(.);
+
+    /* Stuff the CRC in well known symbols at a well known location */
+    __crc_len = ABSOLUTE(.);
+    LONG(0x00000000);
+    __crc_val = ABSOLUTE(.);
+    LONG(0x00000000);
+
+    *(.ver_number)
+    *.c.o(.literal* .text*)
+    *.cpp.o(EXCLUDE_FILE (umm_malloc.cpp.o) .literal* EXCLUDE_FILE (umm_malloc.cpp.o) .text*)
+    *.cc.o(.literal* .text*)
+#ifdef VTABLES_IN_FLASH
+    *(.rodata._ZTV*) /* C++ vtables */
+#endif
+
+    . = ALIGN(4);       /* this table MUST be 4-byte aligned */
+    /*  C++ constructor and destructor tables, properly ordered:  */
+    __init_array_start = ABSOLUTE(.);
+    KEEP (*crtbegin.o(.ctors))
+    KEEP (*(EXCLUDE_FILE (*crtend.o) .ctors))
+    KEEP (*(SORT(.ctors.*)))
+    KEEP (*(.ctors))
+    __init_array_end = ABSOLUTE(.);
+    KEEP (*crtbegin.o(.dtors))
+    KEEP (*(EXCLUDE_FILE (*crtend.o) .dtors))
+    KEEP (*(SORT(.dtors.*)))
+    KEEP (*(.dtors))
+    . = ALIGN(4);       /* this table MUST be 4-byte aligned */
+    _bss_table_start = ABSOLUTE(.);
+    LONG(_bss_start)
+    LONG(_bss_end)
+    _bss_table_end = ABSOLUTE(.);
+
+    *libgcc.a:unwind-dw2.o(.literal .text .rodata .literal.* .text.* .rodata.*)
+    *libgcc.a:unwind-dw2-fde.o(.literal .text .rodata .literal.* .text.* .rodata.*)
+
+    *libc.a:(.literal .text .literal.* .text.*)
+    *libm.a:(.literal .text .literal.* .text.*)
+#ifdef FP_IN_IROM
+    *libgcc.a:*f2.o(.literal .text)
+    *libgcc.a:*f3.o(.literal .text)
+    *libgcc.a:*fsi.o(.literal .text)
+    *libgcc.a:*fdi.o(.literal .text)
+    *libgcc.a:*ifs.o(.literal .text)
+    *libgcc.a:*idf.o(.literal .text)
+#endif
+    *libgcc.a:_umoddi3.o(.literal .text)
+    *libgcc.a:_udivdi3.o(.literal .text)
+    *libgcc.a:_divsf3.o(.literal .text)
+    *libgcc.a:_fixsfsi.o(.literal .text)
+    *libgcc.a:_cmpdf2.o(.literal .text)
+    *libgcc.a:_cmpsf2.o(.literal .text)
+    *libstdc++.a:( .literal .text .literal.* .text.*)
+    *libstdc++-exc.a:( .literal .text .literal.* .text.*)
+    *libsmartconfig.a:(.literal .text .literal.* .text.*)
+    *liblwip_gcc.a:(.literal .text .literal.* .text.*)
+    *liblwip_src.a:(.literal .text .literal.* .text.*)
+    *liblwip2-536.a:(.literal .text .literal.* .text.*)
+    *liblwip2-1460.a:(.literal .text .literal.* .text.*)
+    *liblwip2-536-feat.a:(.literal .text .literal.* .text.*)
+    *liblwip2-1460-feat.a:(.literal .text .literal.* .text.*)
+    *liblwip6-536-feat.a:(.literal .text .literal.* .text.*)
+    *liblwip6-1460-feat.a:(.literal .text .literal.* .text.*)
+    *libbearssl.a:(.literal .text .literal.* .text.*)
+    *libat.a:(.literal.* .text.*)
+    *libcrypto.a:(.literal.* .text.*)
+    *libespnow.a:(.literal.* .text.*)
+    *libjson.a:(.literal.* .text.*)
+    *liblwip.a:(.literal.* .text.*)
+    *libmesh.a:(.literal.* .text.*)
+    *libnet80211.a:(.literal.* .text.*)
+    *libsmartconfig.a:(.literal.* .text.*)
+    *libssl.a:(.literal.* .text.*)
+    *libupgrade.a:(.literal.* .text.*)
+    *libwpa.a:(.literal.* .text.*)
+    *libwpa2.a:(.literal.* .text.*)
+    *libwps.a:(.literal.* .text.*)
+    *(.irom0.literal .irom.literal .irom.text.literal .irom0.text .irom0.text.* .irom.text .irom.text.*)
+
+    /* Constant strings in flash (PSTRs) */
+    *(.irom0.pstr.*)
+
+    /* Inline flash strings PSTR() within templated code */
+    *(.rodata._ZZ*__pstr__*)
+
+    /* __FUNCTION__ locals */
+    *(.rodata._ZZ*__FUNCTION__)
+    *(.rodata._ZZ*__PRETTY_FUNCTION__)
+    *(.rodata._ZZ*__func__)
+
+    /* std::* exception strings, in their own section to allow string coalescing */
+    *(.irom.exceptiontext .rodata.exceptiontext)
+    *(.rodata.*__exception_what__*) /* G++ seems to throw out templatized section attributes */
+
+    /* c++ typeof IDs, etc. */
+    *(.rodata._ZTIN* .rodata._ZTSN10* .rodata._ZTISt* .rodata._ZTSSt*)
+
+    /* Fundamental type info */
+    *(.rodata._ZTIPKc .rodata._ZTIc .rodata._ZTIv .rodata._ZTSv .rodata._ZTSc .rodata._ZTSPKc .rodata._ZTSi .rodata._ZTIi)
+
+    . = ALIGN(4);
+    *(.gcc_except_table .gcc_except_table.*)
+    . = ALIGN(4);
+    __eh_frame = ABSOLUTE(.);
+    KEEP(*(.eh_frame))
+    . = (. + 7) & ~ 3;  /* Add a 0 entry to terminate the list */
+
+    _irom0_text_end = ABSOLUTE(.);
+    _flash_code_end = ABSOLUTE(.);
+  } >irom0_0_seg :irom0_0_phdr
+
+
+
+  .text1 : ALIGN(4)
+  {
+    *(.literal .text .iram.literal .iram.text .iram.text.* .literal.* .text.* .stub .gnu.warning .gnu.linkonce.literal.* .gnu.linkonce.t.*.literal .gnu.linkonce.t.*)
 #ifdef VTABLES_IN_IRAM
     *(.rodata._ZTV*) /* C++ vtables */
 #endif

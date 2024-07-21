@@ -33,6 +33,7 @@ class WiFiServerSecure : public WiFiServer {
   public:
     WiFiServerSecure(IPAddress addr, uint16_t port);
     WiFiServerSecure(uint16_t port);
+    WiFiServerSecure(const WiFiServerSecure &rhs);
     virtual ~WiFiServerSecure();
 
     // Override the default buffer sizes, if you know what you're doing...
@@ -41,34 +42,48 @@ class WiFiServerSecure : public WiFiServer {
       _iobuf_out_size = xmit;
     }
 
+    // Sets the server's cache to the given one.
+    void setCache(ServerSessions *cache) {
+      _cache = cache;
+    }
+
     // Set the server's RSA key and x509 certificate (required, pick one).
     // Caller needs to preserve the chain and key throughout the life of the server.
-    void setRSACert(const BearSSLX509List *chain, const BearSSLPrivateKey *sk);
+    void setRSACert(const X509List *chain, const PrivateKey *sk);
     // Set the server's EC key and x509 certificate (required, pick one)
     // Caller needs to preserve the chain and key throughout the life of the server.
-    void setECCert(const BearSSLX509List *chain, unsigned cert_issuer_key_type, const BearSSLPrivateKey *sk);
+    void setECCert(const X509List *chain, unsigned cert_issuer_key_type, const PrivateKey *sk);
 
     // Require client certificates validated against the passed in x509 trust anchor
     // Caller needs to preserve the cert throughout the life of the server.
-    void setClientTrustAnchor(const BearSSLX509List *client_CA_ta) {
+    void setClientTrustAnchor(const X509List *client_CA_ta) {
       _client_CA_ta = client_CA_ta;
     }
 
-    // If awaiting connection available and authenticated (i.e. client cert), return it.
-    WiFiClientSecure available(uint8_t* status = NULL);
+    // Limit the TLS versions BearSSL will connect with.  Default is
+    // BR_TLS10...BR_TLS12
+    bool setSSLVersion(uint32_t min = BR_TLS10, uint32_t max = BR_TLS12);
 
-    // Compatibility with axTLS interface
-    void setServerKeyAndCert(const uint8_t *key, int keyLen, const uint8_t *cert, int certLen);
-    void setServerKeyAndCert_P(const uint8_t *key, int keyLen, const uint8_t *cert, int certLen);
+    // If awaiting connection available and authenticated (i.e. client cert), return it.
+    WiFiClientSecure accept(); // https://www.arduino.cc/en/Reference/EthernetServerAccept
+    WiFiClientSecure available(uint8_t* status = NULL) __attribute__((deprecated("Renamed to accept().")));
+
+    WiFiServerSecure& operator=(const WiFiServerSecure&) = default;
+
+  using ClientType = WiFiClientSecure;
 
   private:
-    const BearSSLX509List *_chain = nullptr;
+    const X509List *_chain = nullptr;
     unsigned _cert_issuer_key_type = 0;
-    const BearSSLPrivateKey *_sk = nullptr;
+    const PrivateKey *_sk = nullptr;
     int _iobuf_in_size = BR_SSL_BUFSIZE_INPUT;
     int _iobuf_out_size = 837;
-    const BearSSLX509List *_client_CA_ta = nullptr;
-    bool _deleteChainAndKey = false;
+    const X509List *_client_CA_ta = nullptr;
+    ServerSessions *_cache = nullptr;
+
+    // TLS ciphers allowed
+    uint32_t _tls_min = BR_TLS10;
+    uint32_t _tls_max = BR_TLS12;
 };
 
 };

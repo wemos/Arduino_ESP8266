@@ -27,9 +27,10 @@
 #include "ESP8266WiFiType.h"
 #include "ESP8266WiFiGeneric.h"
 #include "user_interface.h"
+#include "LwipIntf.h"
 
 
-class ESP8266WiFiSTAClass {
+class ESP8266WiFiSTAClass: public LwipIntf {
         // ----------------------------------------------------------------------------------------------
         // ---------------------------------------- STA function ----------------------------------------
         // ----------------------------------------------------------------------------------------------
@@ -38,15 +39,25 @@ class ESP8266WiFiSTAClass {
 
         wl_status_t begin(const char* ssid, const char *passphrase = NULL, int32_t channel = 0, const uint8_t* bssid = NULL, bool connect = true);
         wl_status_t begin(char* ssid, char *passphrase = NULL, int32_t channel = 0, const uint8_t* bssid = NULL, bool connect = true);
+        wl_status_t begin(const String& ssid, const String& passphrase = emptyString, int32_t channel = 0, const uint8_t* bssid = NULL, bool connect = true);
         wl_status_t begin();
 
-        //The argument order for ESP is not the same as for Arduino. However, there is compatibility code under the hood 
-        //to detect Arduino arg order, and handle it correctly. Be aware that the Arduino default value handling doesn't 
+        //The argument order for ESP is not the same as for Arduino. However, there is compatibility code under the hood
+        //to detect Arduino arg order, and handle it correctly. Be aware that the Arduino default value handling doesn't
         //work here (see Arduino docs for gway/subnet defaults). In other words: at least 3 args must always be given.
-        bool config(IPAddress local_ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = (uint32_t)0x00000000, IPAddress dns2 = (uint32_t)0x00000000);
+        bool config(IPAddress local_ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = INADDR_ANY, IPAddress dns2 = INADDR_ANY);
+
+        // two and one parameter version. 2nd parameter is DNS like in Arduino
+        // IPv4 only
+        [[deprecated("It is discouraged to use this 1 or 2 parameters network configuration legacy function config(ip[,dns]) as chosen defaults may not match the local network configuration")]]
+        bool config(IPAddress local_ip, IPAddress dns = INADDR_ANY);
+
+        bool setDNS(IPAddress dns1, IPAddress dns2 = INADDR_ANY);
 
         bool reconnect();
+
         bool disconnect(bool wifioff = false);
+        bool disconnect(bool wifioff, bool eraseCredentials);
 
         bool isConnected();
 
@@ -56,7 +67,7 @@ class ESP8266WiFiSTAClass {
         bool setAutoReconnect(bool autoReconnect);
         bool getAutoReconnect();
 
-        uint8_t waitForConnectResult();
+        int8_t waitForConnectResult(unsigned long timeoutLength = 60000);
 
         // STA network info
         IPAddress localIP();
@@ -68,24 +79,24 @@ class ESP8266WiFiSTAClass {
         IPAddress gatewayIP();
         IPAddress dnsIP(uint8_t dns_no = 0);
 
-        String hostname();
-        bool hostname(char* aHostname);
-        bool hostname(const char* aHostname);
-        bool hostname(String aHostname);
-
+        IPAddress broadcastIP();
         // STA WiFi info
         wl_status_t status();
         String SSID() const;
         String psk() const;
 
         uint8_t * BSSID();
+        uint8_t * BSSID(uint8_t* bssid);
         String BSSIDstr();
 
-        int32_t RSSI();
+        int8_t RSSI();
+
+        static void enableInsecureWEP (bool enable = true) { _useInsecureWEP = enable; }
 
     protected:
 
         static bool _useStaticIp;
+        static bool _useInsecureWEP;
 
     // ----------------------------------------------------------------------------------------------
     // ------------------------------------ STA remote configure  -----------------------------------

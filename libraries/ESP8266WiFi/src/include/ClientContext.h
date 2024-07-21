@@ -26,10 +26,9 @@ class WiFiClient;
 
 typedef void (*discard_cb_t)(void*, ClientContext*);
 
-extern "C" void esp_yield();
-extern "C" void esp_schedule();
-
-#include "DataSource.h"
+#include <assert.h>
+#include <esp_priv.h>
+#include <coredecls.h>
 
 bool getDefaultPrivateGlobalSyncValue ();
 
@@ -40,15 +39,20 @@ public:
         _pcb(pcb), _rx_buf(0), _rx_buf_offset(0), _discard_cb(discard_cb), _discard_cb_arg(discard_cb_arg), _refcnt(0), _next(0),
         _sync(::getDefaultPrivateGlobalSyncValue())
     {
-        tcp_setprio(pcb, TCP_PRIO_MIN);
-        tcp_arg(pcb, this);
-        tcp_recv(pcb, &_s_recv);
-        tcp_sent(pcb, &_s_acked);
-        tcp_err(pcb, &_s_error);
-        tcp_poll(pcb, &_s_poll, 1);
+        tcp_setprio(_pcb, TCP_PRIO_MIN);
+        tcp_arg(_pcb, this);
+        tcp_recv(_pcb, &_s_recv);
+        tcp_sent(_pcb, &_s_acked);
+        tcp_err(_pcb, &_s_error);
+        tcp_poll(_pcb, &_s_poll, 1);
 
         // keep-alive not enabled by default
         //keepAlive();
+    }
+
+    tcp_pcb* getPCB ()
+    {
+        return _pcb;
     }
 
     err_t abort()
@@ -124,15 +128,24 @@ public:
 
     int connect(ip_addr_t* addr, uint16_t port)
     {
+        // note: not using `const ip_addr_t* addr` because
+        // - `ip6_addr_assign_zone()` below modifies `*addr`
+        // - caller's parameter `WiFiClient::connect` is a local copy
+#if LWIP_IPV6
+        // Set zone so that link local addresses use the default interface
+        if (IP_IS_V6(addr) && ip6_addr_lacks_zone(ip_2_ip6(addr), IP6_UNKNOWN)) {
+            ip6_addr_assign_zone(ip_2_ip6(addr), IP6_UNKNOWN, netif_default);
+        }
+#endif
         err_t err = tcp_connect(_pcb, addr, port, &ClientContext::_s_connected);
         if (err != ERR_OK) {
             return 0;
         }
-        _connect_pending = 1;
+        _connect_pending = true;
         _op_start_time = millis();
-        // This delay will be interrupted by esp_schedule in the connect callback
-        delay(_timeout_ms);
-        _connect_pending = 0;
+        // will resume on timeout or when _connected or _notify_error fires
+        esp_delay(_timeout_ms, [this]() { return this->_connect_pending; });
+        _connect_pending = false;
         if (!_pcb) {
             DEBUGV(":cabrt\r\n");
             return 0;
@@ -145,7 +158,7 @@ public:
         return 1;
     }
 
-    size_t availableForWrite()
+    size_t availableForWrite() const
     {
         return _pcb? tcp_sndbuf(_pcb): 0;
     }
@@ -180,13 +193,13 @@ public:
         return _timeout_ms;
     }
 
-    uint32_t getRemoteAddress() const
+    const ip_addr_t* getRemoteAddress() const
     {
         if(!_pcb) {
             return 0;
         }
 
-        return _pcb->remote_ip.addr;
+        return &_pcb->remote_ip;
     }
 
     uint16_t getRemotePort() const
@@ -198,13 +211,13 @@ public:
         return _pcb->remote_port;
     }
 
-    uint32_t getLocalAddress() const
+    const ip_addr_t* getLocalAddress() const
     {
         if(!_pcb) {
             return 0;
         }
 
-        return _pcb->local_ip.addr;
+        return &_pcb->local_ip;
     }
 
     uint16_t getLocalPort() const
@@ -288,6 +301,7 @@ public:
 
     void discard_received()
     {
+        DEBUGV(":dsrcv %d\n", _rx_buf? _rx_buf->tot_len: 0);
         if(!_rx_buf) {
             return;
         }
@@ -299,7 +313,7 @@ public:
         _rx_buf_offset = 0;
     }
 
-    bool wait_until_sent(int max_wait_ms = WIFICLIENT_MAX_FLUSH_WAIT_MS)
+    bool wait_until_acked(int max_wait_ms = WIFICLIENT_MAX_FLUSH_WAIT_MS)
     {
         // https://github.com/esp8266/Arduino/pull/3967#pullrequestreview-83451496
         // option 1 done
@@ -308,13 +322,19 @@ public:
         if (!_pcb)
             return true;
 
-        int loop = -1;
         int prevsndbuf = -1;
-        max_wait_ms++;
 
         // wait for peer's acks to flush lwIP's output buffer
-
+        uint32_t last_sent = millis();
         while (1) {
+            if (millis() - last_sent > (uint32_t) max_wait_ms) {
+#ifdef DEBUGV
+                // wait until sent: timeout
+                DEBUGV(":wustmo\n");
+#endif
+                // All data was not flushed, timeout hit
+                return false;
+            }
 
             // force lwIP to send what can be sent
             tcp_output(_pcb);
@@ -322,59 +342,40 @@ public:
             int sndbuf = tcp_sndbuf(_pcb);
             if (sndbuf != prevsndbuf) {
                 // send buffer has changed (or first iteration)
-                // we received an ack: restart the loop counter
                 prevsndbuf = sndbuf;
-                loop = max_wait_ms;
+                // We just sent a bit, move timeout forward
+                last_sent = millis();
             }
 
-            if (state() != ESTABLISHED || sndbuf == TCP_SND_BUF || --loop <= 0)
+            esp_yield(); // from sys or os context
+
+            if ((state() != ESTABLISHED) || (sndbuf == TCP_SND_BUF)) {
+                // peer has closed or all bytes are sent and acked
+                // ((TCP_SND_BUF-sndbuf) is the amount of un-acked bytes)
                 break;
-
-            delay(1);
+            }
         }
 
-        #ifdef DEBUGV
-        if (loop <= 0) {
-            // wait until sent: timeout
-            DEBUGV(":wustmo\n");
-        }
-        #endif
-
-        return max_wait_ms > 0;
+        // All data flushed
+        return true;
     }
 
     uint8_t state() const
     {
-        if(!_pcb) {
+        if(!_pcb || _pcb->state == CLOSE_WAIT || _pcb->state == CLOSING) {
+            // CLOSED for WiFIClient::status() means nothing more can be written
             return CLOSED;
         }
 
         return _pcb->state;
     }
 
-    size_t write(const uint8_t* data, size_t size)
+    size_t write(const char* ds, const size_t dl)
     {
         if (!_pcb) {
             return 0;
         }
-        return _write_from_source(new BufferDataSource(data, size));
-    }
-
-    size_t write(Stream& stream)
-    {
-        if (!_pcb) {
-            return 0;
-        }
-        return _write_from_source(new BufferedStreamDataSource<Stream>(stream, stream.available()));
-    }
-
-    size_t write_P(PGM_P buf, size_t size)
-    {
-        if (!_pcb) {
-            return 0;
-        }
-        ProgmemStream stream(buf, size);
-        return _write_from_source(new BufferedStreamDataSource<ProgmemStream>(stream, size));
+        return _write_from_source(ds, dl);
     }
 
     void keepAlive (uint16_t idle_sec = TCP_DEFAULT_KEEPALIVE_IDLE_SEC, uint16_t intv_sec = TCP_DEFAULT_KEEPALIVE_INTERVAL_SEC, uint8_t count = TCP_DEFAULT_KEEPALIVE_COUNT)
@@ -419,6 +420,29 @@ public:
         _sync = sync;
     }
 
+    // return a pointer to available data buffer (size = peekAvailable())
+    // semantic forbids any kind of read() before calling peekConsume()
+    const char* peekBuffer ()
+    {
+        if (!_rx_buf)
+            return nullptr;
+        return (const char*)_rx_buf->payload + _rx_buf_offset;
+    }
+
+    // return number of byte accessible by peekBuffer()
+    size_t peekAvailable ()
+    {
+        if (!_rx_buf)
+            return 0;
+        return _rx_buf->len - _rx_buf_offset;
+    }
+
+    // consume bytes after use (see peekBuffer)
+    void peekConsume (size_t consume)
+    {
+        _consume(consume);
+    }
+
 protected:
 
     bool _is_timeout()
@@ -429,15 +453,19 @@ protected:
     void _notify_error()
     {
         if (_connect_pending || _send_waiting) {
+            // resume connect or _write_from_source
+            _send_waiting = false;
+            _connect_pending = false;
             esp_schedule();
         }
     }
 
-    size_t _write_from_source(DataSource* ds)
+    size_t _write_from_source(const char* ds, const size_t dl)
     {
         assert(_datasource == nullptr);
-        assert(_send_waiting == 0);
+        assert(!_send_waiting);
         _datasource = ds;
+        _datalen = dl;
         _written = 0;
         _op_start_time = millis();
         do {
@@ -445,22 +473,23 @@ protected:
                 _op_start_time = millis();
             }
 
-            if (!_datasource->available() || _is_timeout() || state() == CLOSED) {
+            if (_written == _datalen || _is_timeout() || state() == CLOSED) {
                 if (_is_timeout()) {
                     DEBUGV(":wtmo\r\n");
                 }
-                delete _datasource;
                 _datasource = nullptr;
+                _datalen = 0;
                 break;
             }
 
-            ++_send_waiting;
-            esp_yield();
+            _send_waiting = true;
+            // will resume on timeout or when _write_some_from_cb or _notify_error fires
+            esp_delay(_timeout_ms, [this]() { return this->_send_waiting; });
+            _send_waiting = false;
         } while(true);
-        _send_waiting = 0;
 
         if (_sync)
-            wait_until_sent();
+            wait_until_acked();
 
         return _written;
     }
@@ -471,46 +500,51 @@ protected:
             return false;
         }
 
-        DEBUGV(":wr %d %d\r\n", _datasource->available(), _written);
+        DEBUGV(":wr %d %d\r\n", _datalen - _written, _written);
 
         bool has_written = false;
 
-        while (_datasource) {
+        while (_written < _datalen) {
             if (state() == CLOSED)
                 return false;
-            size_t next_chunk_size = std::min((size_t)tcp_sndbuf(_pcb), _datasource->available());
+            const auto remaining = _datalen - _written;
+            size_t next_chunk_size = std::min((size_t)tcp_sndbuf(_pcb), remaining);
             if (!next_chunk_size)
                 break;
-            const uint8_t* buf = _datasource->get_buffer(next_chunk_size);
-            // use TCP_WRITE_FLAG_MORE to remove PUSH flag from packet (lwIP's doc),
-            // because PUSH code implicitely disables Nagle code (see lwIP's tcp_out.c)
-            // Notes:
-            //   PUSH is meant for peer, telling to give data to user app as soon as received
-            //   PUSH "may be set" when sender has finished sending a meaningful data block
-            //   PUSH is quite unclear in its application
-            //   Nagle is for shortly delaying outgoing data, to send less/bigger packets
-            uint8_t flags = TCP_WRITE_FLAG_MORE; // do not tcp-PuSH
+            const char* buf = _datasource + _written;
+
+            uint8_t flags = 0;
+            if (next_chunk_size < remaining)
+                //   PUSH is meant for peer, telling to give data to user app as soon as received
+                //   PUSH "may be set" when sender has finished sending a "meaningful" data block
+                //   PUSH does not break Nagle
+                //   #5173: windows needs this flag
+                //   more info: https://lists.gnu.org/archive/html/lwip-users/2009-11/msg00018.html
+                flags |= TCP_WRITE_FLAG_MORE; // do not tcp-PuSH (yet)
             if (!_sync)
                 // user data must be copied when data are sent but not yet acknowledged
                 // (with sync, we wait for acknowledgment before returning to user)
                 flags |= TCP_WRITE_FLAG_COPY;
+
             err_t err = tcp_write(_pcb, buf, next_chunk_size, flags);
-            DEBUGV(":wrc %d %d %d\r\n", next_chunk_size, _datasource->available(), (int)err);
+
+            DEBUGV(":wrc %d %d %d\r\n", next_chunk_size, remaining, (int)err);
+
             if (err == ERR_OK) {
-                _datasource->release_buffer(buf, next_chunk_size);
                 _written += next_chunk_size;
                 has_written = true;
             } else {
-		// ERR_MEM(-1) is a valid error meaning
-		// "come back later". It leaves state() opened
+                // ERR_MEM(-1) is a valid error meaning
+                // "come back later". It leaves state() opened
                 break;
             }
         }
 
-        if (has_written && (_sync || tcp_nagle_disabled(_pcb)))
+        if (has_written)
         {
-            // handle no-Nagle manually because of TCP_WRITE_FLAG_MORE
             // lwIP's tcp_output doc: "Find out what we can send and send it"
+            // *with respect to Nagle*
+            // more info: https://lists.gnu.org/archive/html/lwip-users/2017-11/msg00134.html
             tcp_output(_pcb);
         }
 
@@ -519,8 +553,9 @@ protected:
 
     void _write_some_from_cb()
     {
-        if (_send_waiting == 1) {
-            _send_waiting--;
+        if (_send_waiting) {
+            // resume _write_from_source
+            _send_waiting = false;
             esp_schedule();
         }
     }
@@ -536,8 +571,6 @@ protected:
 
     void _consume(size_t size)
     {
-        if(_pcb)
-            tcp_recved(_pcb, size);
         ptrdiff_t left = _rx_buf->len - _rx_buf_offset - size;
         if(left > 0) {
             _rx_buf_offset += size;
@@ -554,17 +587,31 @@ protected:
             pbuf_ref(_rx_buf);
             pbuf_free(head);
         }
+        if(_pcb)
+            tcp_recved(_pcb, size);
     }
 
     err_t _recv(tcp_pcb* pcb, pbuf* pb, err_t err)
     {
         (void) pcb;
         (void) err;
-        if(pb == 0) { // connection closed
-            DEBUGV(":rcl\r\n");
+        if(pb == 0) {
+            // connection closed by peer
+            DEBUGV(":rcl pb=%p sz=%d\r\n", _rx_buf, _rx_buf? _rx_buf->tot_len: -1);
             _notify_error();
-            abort();
-            return ERR_ABRT;
+            if (_rx_buf && _rx_buf->tot_len)
+            {
+                // there is still something to read
+                return ERR_OK;
+            }
+            else
+            {
+                // nothing in receive buffer,
+                // peer closed = nothing can be written:
+                // closing in the legacy way
+                abort();
+                return ERR_ABRT;
+            }
         }
 
         if(_rx_buf) {
@@ -595,8 +642,11 @@ protected:
         (void) err;
         (void) pcb;
         assert(pcb == _pcb);
-        assert(_connect_pending);
-        esp_schedule();
+        if (_connect_pending) {
+            // resume connect
+            _connect_pending = false;
+            esp_schedule();
+        }
         return ERR_OK;
     }
 
@@ -640,12 +690,13 @@ private:
     discard_cb_t _discard_cb;
     void* _discard_cb_arg;
 
-    DataSource* _datasource = nullptr;
+    const char* _datasource = nullptr;
+    size_t _datalen = 0;
     size_t _written = 0;
     uint32_t _timeout_ms = 5000;
     uint32_t _op_start_time = 0;
-    uint8_t _send_waiting = 0;
-    uint8_t _connect_pending = 0;
+    bool _send_waiting = false;
+    bool _connect_pending = false;
 
     int8_t _refcnt;
     ClientContext* _next;

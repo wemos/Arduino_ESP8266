@@ -34,23 +34,27 @@
 
 #ifdef DEBUG_ESP_HTTP_UPDATE
 #ifdef DEBUG_ESP_PORT
-#define DEBUG_HTTP_UPDATE(...) DEBUG_ESP_PORT.printf( __VA_ARGS__ )
+#define DEBUG_HTTP_UPDATE(fmt, ...) DEBUG_ESP_PORT.printf_P( (PGM_P)PSTR(fmt), ## __VA_ARGS__ )
 #endif
 #endif
 
 #ifndef DEBUG_HTTP_UPDATE
-#define DEBUG_HTTP_UPDATE(...)
+#define DEBUG_HTTP_UPDATE(...) do { (void)0; } while(0)
 #endif
 
 /// note we use HTTP client errors too so we start at 100
-#define HTTP_UE_TOO_LESS_SPACE              (-100)
-#define HTTP_UE_SERVER_NOT_REPORT_SIZE      (-101)
-#define HTTP_UE_SERVER_FILE_NOT_FOUND       (-102)
-#define HTTP_UE_SERVER_FORBIDDEN            (-103)
-#define HTTP_UE_SERVER_WRONG_HTTP_CODE      (-104)
-#define HTTP_UE_SERVER_FAULTY_MD5           (-105)
-#define HTTP_UE_BIN_VERIFY_HEADER_FAILED    (-106)
-#define HTTP_UE_BIN_FOR_WRONG_FLASH         (-107)
+enum HTTPUpdateError {
+    HTTP_UE_SERVER_NOT_REPORT_VERSION    = -109, // server did not respond with a firmware version
+    HTTP_UE_SERVER_UNAUTHORIZED,        // -108
+    HTTP_UE_BIN_FOR_WRONG_FLASH,        // -107
+    HTTP_UE_BIN_VERIFY_HEADER_FAILED,   // -106
+    HTTP_UE_SERVER_FAULTY_MD5,          // -105
+    HTTP_UE_SERVER_WRONG_HTTP_CODE,     // -104
+    HTTP_UE_SERVER_FORBIDDEN,           // -103
+    HTTP_UE_SERVER_FILE_NOT_FOUND,      // -102
+    HTTP_UE_SERVER_NOT_REPORT_SIZE,     // -101
+    HTTP_UE_TOO_LESS_SPACE              // -100
+};
 
 enum HTTPUpdateResult {
     HTTP_UPDATE_FAILED,
@@ -59,6 +63,11 @@ enum HTTPUpdateResult {
 };
 
 typedef HTTPUpdateResult t_httpUpdate_return; // backward compatibility
+
+using HTTPUpdateStartCB = std::function<void()>;
+using HTTPUpdateEndCB = std::function<void()>;
+using HTTPUpdateErrorCB = std::function<void(int)>;
+using HTTPUpdateProgressCB = std::function<void(int, int)>;
 
 class ESP8266HTTPUpdate
 {
@@ -72,45 +81,93 @@ public:
         _rebootOnUpdate = reboot;
     }
 
-    // This function is deprecated, use rebootOnUpdate and the next one instead
-    t_httpUpdate_return update(const String& url, const String& currentVersion,
-                               const String& httpsFingerprint, bool reboot) __attribute__((deprecated));
-    t_httpUpdate_return update(const String& url, const String& currentVersion = "");
-    t_httpUpdate_return update(const String& url, const String& currentVersion,
-                               const String& httpsFingerprint);
-    t_httpUpdate_return update(const String& url, const String& currentVersion,
-                               const uint8_t httpsFingerprint[20]); // BearSSL
+    /**
+     * set true to follow redirects.
+     * @param follow
+     * @deprecated Please use `setFollowRedirects(followRedirects_t follow)`
+      */
+    void followRedirects(bool follow) __attribute__ ((deprecated))
+    {
+        _followRedirects = follow ? HTTPC_STRICT_FOLLOW_REDIRECTS : HTTPC_DISABLE_FOLLOW_REDIRECTS;
+    }
+    /**
+      * set redirect follow mode. See `followRedirects_t` enum for available modes.
+      * @param follow
+      */
+    void setFollowRedirects(followRedirects_t follow)
+    {
+        _followRedirects = follow;
+    }
 
-    // This function is deprecated, use one of the overloads below along with rebootOnUpdate
-    t_httpUpdate_return update(const String& host, uint16_t port, const String& uri, const String& currentVersion,
-                               bool https, const String& httpsFingerprint, bool reboot) __attribute__((deprecated));
+    void closeConnectionsOnUpdate(bool sever)
+    {
+        _closeConnectionsOnUpdate = sever;
+    }
 
-    t_httpUpdate_return update(const String& host, uint16_t port, const String& uri = "/",
+    void setLedPin(int ledPin = -1, uint8_t ledOn = HIGH)
+    {
+        _ledPin = ledPin;
+        _ledOn = ledOn;
+    }
+
+    void setMD5sum(const String &md5Sum) 
+    {
+        _md5Sum = md5Sum;
+    }
+
+    void setAuthorization(const String& user, const String& password);
+    void setAuthorization(const String& auth);
+
+    t_httpUpdate_return update(WiFiClient& client, const String& url, const String& currentVersion = "");
+    t_httpUpdate_return update(WiFiClient& client, const String& host, uint16_t port, const String& uri = "/",
                                const String& currentVersion = "");
-    t_httpUpdate_return update(const String& host, uint16_t port, const String& url,
-                               const String& currentVersion, const String& httpsFingerprint);
-    t_httpUpdate_return update(const String& host, uint16_t port, const String& url,
-                               const String& currentVersion, const uint8_t httpsFingerprint[20]); // BearSSL
+    t_httpUpdate_return updateFS(WiFiClient& client, const String& url, const String& currentVersion = "");
+    t_httpUpdate_return update(HTTPClient& httpClient, const String& currentVersion = "");
+    t_httpUpdate_return updateFS(HTTPClient& httpClient, const String& currentVersion = "");
 
-    // This function is deprecated, use rebootOnUpdate and the next one instead
-    t_httpUpdate_return updateSpiffs(const String& url, const String& currentVersion,
-                                     const String& httpsFingerprint, bool reboot) __attribute__((deprecated));
-    t_httpUpdate_return updateSpiffs(const String& url, const String& currentVersion = "");
-    t_httpUpdate_return updateSpiffs(const String& url, const String& currentVersion, const String& httpsFingerprint);
-    t_httpUpdate_return updateSpiffs(const String& url, const String& currentVersion, const uint8_t httpsFingerprint[20]); // BearSSL
+    t_httpUpdate_return getAvailableVersion(WiFiClient& client, const String& host, uint16_t port, const String& uri, const String& current_version, String& available_version);
 
+    // Notification callbacks
+    void onStart(HTTPUpdateStartCB cbOnStart)          { _cbStart = cbOnStart; }
+    void onEnd(HTTPUpdateEndCB cbOnEnd)                { _cbEnd = cbOnEnd; }
+    void onError(HTTPUpdateErrorCB cbOnError)          { _cbError = cbOnError; }
+    void onProgress(HTTPUpdateProgressCB cbOnProgress) { _cbProgress = cbOnProgress; }
 
     int getLastError(void);
     String getLastErrorString(void);
 
+    void setClientTimeout(int timeout) {
+        _httpClientTimeout = timeout;
+    }
 protected:
     t_httpUpdate_return handleUpdate(HTTPClient& http, const String& currentVersion, bool spiffs = false);
-    bool runUpdate(Stream& in, uint32_t size, String md5, int command = U_FLASH);
+    bool runUpdate(Stream& in, uint32_t size, const String& md5, int command = U_FLASH);
 
+    // Set the error and potentially use a CB to notify the application
+    void _setLastError(int err) {
+        _lastError = err;
+        if (_cbError) {
+            _cbError(err);
+        }
+    }
     int _lastError;
     bool _rebootOnUpdate = true;
-private:
+    bool _closeConnectionsOnUpdate = true;
+    String _user;
+    String _password;
+    String _auth;
+    String _md5Sum;
     int _httpClientTimeout;
+    followRedirects_t _followRedirects = HTTPC_DISABLE_FOLLOW_REDIRECTS;
+private:
+    // Callbacks
+    HTTPUpdateStartCB    _cbStart;
+    HTTPUpdateEndCB      _cbEnd;
+    HTTPUpdateErrorCB    _cbError;
+    HTTPUpdateProgressCB _cbProgress;
+
+    int _ledPin = -1;
+    uint8_t _ledOn;
 };
 
 #if !defined(NO_GLOBAL_INSTANCES) && !defined(NO_GLOBAL_HTTPUPDATE)

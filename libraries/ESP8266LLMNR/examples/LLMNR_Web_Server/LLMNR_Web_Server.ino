@@ -7,7 +7,7 @@
    Version 1.1
    Copyright (c) 2013 Tony DiCola (tony@tonydicola.com)
    ESP8266 port (c) 2015 Ivan Grokhotkov (ivan@esp8266.com)
-   MDNS-SD Suport 2015 Hristo Gochkov
+   MDNS-SD Support 2015 Hristo Gochkov
    Extended MDNS-SD support 2016 Lars Englund (lars.englund@gmail.com)
 
    License (MIT license):
@@ -60,8 +60,13 @@
 #include <ESP8266WebServer.h>
 #include <WiFiClient.h>
 
-const char* ssid = "replace_me";
-const char* password = "replace_me";
+#ifndef STASSID
+#define STASSID "your-ssid"
+#define STAPSK "your-password"
+#endif
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
 
 ESP8266WebServer web_server(80);
 

@@ -4,6 +4,7 @@
 #include <DNSServer.h>
 #include <ESP8266mDNS.h>
 #include <EEPROM.h>
+#include <uri/UriGlob.h>
 
 /*
    This example serves a "hello world" on a WLAN and a SoftAP at the same time.
@@ -18,15 +19,20 @@
 */
 
 /* Set these to your desired softAP credentials. They are not configurable at runtime */
-const char *softAP_ssid = "ESP_ap";
-const char *softAP_password = "12345678";
+#ifndef APSSID
+#define APSSID "ESP_ap"
+#define APPSK "12345678"
+#endif
+
+const char *softAP_ssid = APSSID;
+const char *softAP_password = APPSK;
 
 /* hostname for mDNS. Should work at least on windows. Try http://esp8266.local */
 const char *myHostname = "esp8266";
 
 /* Don't set this wifi credentials. They are configurated at runtime and stored on EEPROM */
-char ssid[32] = "";
-char password[32] = "";
+char ssid[33] = "";
+char password[65] = "";
 
 // DNS server
 const byte DNS_PORT = 53;
@@ -36,7 +42,7 @@ DNSServer dnsServer;
 ESP8266WebServer server(80);
 
 /* Soft AP network parameters */
-IPAddress apIP(192, 168, 4, 1);
+IPAddress apIP(172, 217, 28, 1);
 IPAddress netMsk(255, 255, 255, 0);
 
 
@@ -51,13 +57,13 @@ unsigned int status = WL_IDLE_STATUS;
 
 void setup() {
   delay(1000);
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println();
   Serial.println("Configuring access point...");
   /* You can remove the password parameter if you want the AP to be open. */
   WiFi.softAPConfig(apIP, apIP, netMsk);
   WiFi.softAP(softAP_ssid, softAP_password);
-  delay(500); // Without delay I've seen the IP address blank
+  delay(500);  // Without delay I've seen the IP address blank
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
@@ -69,13 +75,13 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/wifi", handleWifi);
   server.on("/wifisave", handleWifiSave);
-  server.on("/generate_204", handleRoot);  //Android captive portal. Maybe not needed. Might be handled by notFound handler.
-  server.on("/fwlink", handleRoot);  //Microsoft captive portal. Maybe not needed. Might be handled by notFound handler.
+  server.on(UriGlob("/generate_204*"), handleRoot);  // Android captive portal. Handle "/generate_204_<uuid>"-like requests. Might be handled by notFound handler.
+  server.on("/fwlink", handleRoot);                  // Microsoft captive portal. Maybe not needed. Might be handled by notFound handler.
   server.onNotFound(handleNotFound);
-  server.begin(); // Web server start
+  server.begin();  // Web server start
   Serial.println("HTTP server started");
-  loadCredentials(); // Load WLAN credentials from network
-  connect = strlen(ssid) > 0; // Request WLAN connect if there is a SSID
+  loadCredentials();           // Load WLAN credentials from network
+  connect = strlen(ssid) > 0;  // Request WLAN connect if there is a SSID
 }
 
 void connectWifi() {
@@ -101,7 +107,7 @@ void loop() {
       /* Don't set retry time too low as retry interfere the softAP operation */
       connect = true;
     }
-    if (status != s) { // WLAN status change
+    if (status != s) {  // WLAN status change
       Serial.print("Status: ");
       Serial.println(s);
       status = s;
@@ -125,11 +131,11 @@ void loop() {
         WiFi.disconnect();
       }
     }
+    if (s == WL_CONNECTED) { MDNS.update(); }
   }
   // Do work:
-  //DNS
+  // DNS
   dnsServer.processNextRequest();
-  //HTTP
+  // HTTP
   server.handleClient();
 }
-

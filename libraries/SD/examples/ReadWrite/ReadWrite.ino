@@ -25,11 +25,7 @@ File myFile;
 
 void setup() {
   // Open serial communications and wait for port to open:
-  Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for Leonardo only
-  }
-
+  Serial.begin(115200);
 
   Serial.print("Initializing SD card...");
 
@@ -61,9 +57,7 @@ void setup() {
     Serial.println("test.txt:");
 
     // read from the file until there's nothing else in it:
-    while (myFile.available()) {
-      Serial.write(myFile.read());
-    }
+    while (myFile.available()) { Serial.write(myFile.read()); }
     // close the file:
     myFile.close();
   } else {
@@ -75,5 +69,3 @@ void setup() {
 void loop() {
   // nothing happens after setup
 }
-
-

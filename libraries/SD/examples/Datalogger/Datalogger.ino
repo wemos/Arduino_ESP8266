@@ -27,11 +27,7 @@ const int chipSelect = 4;
 
 void setup() {
   // Open serial communications and wait for port to open:
-  Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for Leonardo only
-  }
-
+  Serial.begin(115200);
 
   Serial.print("Initializing SD card...");
 
@@ -52,9 +48,7 @@ void loop() {
   for (int analogPin = 0; analogPin < 3; analogPin++) {
     int sensor = analogRead(analogPin);
     dataString += String(sensor);
-    if (analogPin < 2) {
-      dataString += ",";
-    }
+    if (analogPin < 2) { dataString += ","; }
   }
 
   // open the file. note that only one file can be open at a time,
@@ -69,16 +63,5 @@ void loop() {
     Serial.println(dataString);
   }
   // if the file isn't open, pop up an error:
-  else {
-    Serial.println("error opening datalog.txt");
-  }
+  else { Serial.println("error opening datalog.txt"); }
 }
-
-
-
-
-
-
-
-
-

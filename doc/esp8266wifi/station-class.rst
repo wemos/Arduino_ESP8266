@@ -7,6 +7,8 @@ The number of features provided by ESP8266 in the station mode is far more exten
 
 Description of station class has been broken down into four parts. First discusses methods to establish connection to an access point. Second provides methods to manage connection like e.g. ``reconnect`` or ``isConnected``. Third covers properties to obtain information about connection like MAC or IP address. Finally the fourth section provides alternate methods to connect like e.g. Wi-Fi Protected Setup (WPS).
 
+An effort to unify such network device class accross several Arduino core implementations has been made.  Recommandations are located at `Arduino-Networking-API <https://github.com/JAndrassy/Arduino-Networking-API>`__ and tested with `NetApiHelpers <https://github.com/JAndrassy/NetApiHelpers>`__.  Esp8266 Arduino core's station class is also following these guidelines.
+
 Table of Contents
 -----------------
 
@@ -97,8 +99,12 @@ config
 
 Disable `DHCP <https://en.wikipedia.org/wiki/Dynamic_Host_Configuration_Protocol>`__ client (Dynamic Host Configuration Protocol) and set the IP configuration of station interface to user defined arbitrary values. The interface will be a static IP configuration instead of values provided by DHCP.
 
+Note that to reenable DHCP, all three parameters (local_ip, gateway and subnet) as IPv4 ``0U`` (= 0.0.0.0) must be passed back to config() and re-connecting is needed.
+
 .. code:: cpp
 
+    WiFi.config(local_ip, gateway, subnet)             (for Arduino API portability, discouraged as chosen defaults may not match the local network configuration)
+    WiFi.config(local_ip, gateway, subnet, dns1)
     WiFi.config(local_ip, gateway, subnet, dns1, dns2)
 
 Function will return ``true`` if configuration change is applied successfully. If configuration can not be applied, because e.g. module is not in station or station + soft access point mode, then ``false`` will be returned.
@@ -115,6 +121,21 @@ The following IP configuration may be provided:
    Domain Name Servers (DNS) that maintain a directory of domain names
    (like e.g. *www.google.co.uk*) and translate them for us to IP
    addresses
+
+For Arduino networking API compatibility, the ESP8266WiFi library supports IPv4-only additional versions of the ``config`` function:
+
+.. code:: cpp
+
+    WiFi.config(local_ip)                        (for Arduino API portability, discouraged as chosen defaults may not match the local network configuration)
+    WiFi.config(local_ip, dns)                   (for Arduino API portability, discouraged as chosen defaults may not match the local network configuration)
+    WiFi.config(local_ip, dns, gateway)          (for Arduino API portability, discouraged as chosen defaults may not match the local network configuration)
+    WiFi.config(local_ip, dns, gateway, subnet)
+
+Versions where some of ``dns``, ``gateway`` and ``subnet`` parameters are not specified use a default value. Default ``subnet`` is 255.255.255.0. Default ``gateway`` and ``dns`` are derived from ``local_ip`` by changing the last number to 1. It is discouraged to use these default values as they may not apply to every network configuration.
+
+Reminder : To reenable DHCP you can use ``WiFi.config(0U, 0U, 0U);``.
+
+**Warning: The default values for dns, gateway and subnet may not match your router's settings.** Also please note, that ``config(local_ip, gateway)`` is not supported and ``WiFi.config(local_ip, gateway, subnet)`` doesn't set the DNS server IP.
 
 *Example code:*
 
@@ -135,8 +156,8 @@ The following IP configuration may be provided:
       Serial.println();
 
       Serial.printf("Connecting to %s\n", ssid);
-      WiFi.begin(ssid, password);
       WiFi.config(staticIP, gateway, subnet);
+      WiFi.begin(ssid, password);
       while (WiFi.status() != WL_CONNECTED)
       {
         delay(500);
@@ -157,8 +178,7 @@ The following IP configuration may be provided:
     .
     Connected, IP address: 192.168.1.22
 
-Please note that station with static IP configuration usually connects to the network faster. In the above example it took about 500ms (one dot `.` displayed). This is because obtaining of IP configuration by DHCP client takes time and in this case this step is skipped. If you pass all three parameter as 0.0.0.0 (local_ip, gateway and subnet), it will re enable DHCP. You need to re-connect the device to get new IPs.
-
+Please note that station with static IP configuration usually connects to the network faster. In the above example it took about 500ms (one dot `.` displayed). This is because obtaining of IP configuration by DHCP client takes time and in this case this step is skipped. Reminder: If you pass all three parameters as 0.0.0.0 (local_ip, gateway and subnet), it will re enable DHCP. You need to re-connect the device to get new IPs.
 
 Manage Connection
 ~~~~~~~~~~~~~~~~~
@@ -250,10 +270,12 @@ Wait until module connects to the access point. This function is intended for mo
 Function returns one of the following connection statuses: 
 
 - ``WL_CONNECTED`` after successful connection is established 
-- ``WL_NO_SSID_AVAIL`` in case configured SSID cannot be reached 
-- ``WL_CONNECT_FAILED`` if password is incorrect 
+- ``WL_NO_SSID_AVAIL`` in case configured SSID cannot be reached
+- ``WL_CONNECT_FAILED`` if connection failed 
+- ``WL_CONNECT_WRONG_PASSWORD`` if password is incorrect 
 - ``WL_IDLE_STATUS`` when Wi-Fi is in process of changing between statuses 
 - ``WL_DISCONNECTED`` if module is not configured in station mode
+- ``-1`` on timeout
 
 Configuration
 ~~~~~~~~~~~~~
@@ -409,7 +431,7 @@ Get the DHCP hostname assigned to ESP station.
 
     WiFi.hostname()
 
-Function returns ``String`` type. Default hostname is in format ``ESP_24xMAC``\ where 24xMAC are the last 24 bits of module's MAC address.
+Function returns ``String`` type. Default hostname is in format ``ESP_24xMAC`` where 24xMAC are the last 24 bits of module's MAC address.
 
 The hostname may be changed using the following function:
 
@@ -442,7 +464,6 @@ Return the status of Wi-Fi connection.
 .. code:: cpp
 
     WiFi.status()
-::
 
 Function returns one of the following connection statuses:
 
@@ -502,7 +523,7 @@ Basing on this example, when running above code, module is initially disconnecte
 SSID
 ^^^^
 
-Return the name of Wi-Fi network, formally called `Service Set Identification (SSID) <http://www.juniper.net/techpubs/en_US/network-director1.1/topics/concept/wireless-ssid-bssid-essid.html#jd0e34>`__.
+Return the name of Wi-Fi network, formally called `Service Set Identification (SSID) <https://www.juniper.net/techpubs/en_US/network-director1.1/topics/concept/wireless-ssid-bssid-essid.html#jd0e34>`__.
 
 .. code:: cpp
 
@@ -536,7 +557,7 @@ Function returns value of the ``String`` type.
 BSSID
 ^^^^^
 
-Return the mac address the access point where ESP module is connected to. This address is formally called `Basic Service Set Identification (BSSID) <http://www.juniper.net/techpubs/en_US/network-director1.1/topics/concept/wireless-ssid-bssid-essid.html#jd0e47>`__.
+Return the mac address of the access point to which the ESP module was directed to connect to. This address is formally called `Basic Service Set Identification (BSSID) <https://www.juniper.net/techpubs/en_US/network-director1.1/topics/concept/wireless-ssid-bssid-essid.html#jd0e47>`__. The returned pointer is what the user configured when calling begin() with a bssid argument. It does _not_ necessarily reflect the mac address of the access point to which the ESP module's station interface is currently connected to.
 
 .. code:: cpp
 
@@ -588,12 +609,12 @@ Signal strength value is provided in dBm. The type of returned value is ``int32_
 Connect Different
 ~~~~~~~~~~~~~~~~~
 
-`ESP8266 SDK <http://bbs.espressif.com/viewtopic.php?f=51&t=1023>`__ provides alternate methods to connect ESP station to an access point. Out of them `esp8266 / Arduino <https://github.com/esp8266/Arduino>`__ core implements `WPS <#wps>`__ and `Smart Config <#smart-config>`__ as described in more details below.
+`ESP8266 SDK <https://bbs.espressif.com/viewtopic.php?f=51&t=1023>`__ provides alternate methods to connect ESP station to an access point. Out of them `esp8266 / Arduino <https://github.com/esp8266/Arduino>`__ core implements `WPS <#wps>`__ and `Smart Config <#smart-config>`__ as described in more details below.
 
 WPS
 ^^^
 
-The following ``beginWPSConfig`` function allows connecting to a network using `Wi-Fi Protected Setup (WPS) <https://en.wikipedia.org/wiki/Wi-Fi_Protected_Setup>`__. Currently only `push-button configuration <http://www.wi-fi.org/knowledge-center/faq/how-does-wi-fi-protected-setup-work>`__ (``WPS_TYPE_PBC`` mode) is supported (SDK 1.5.4).
+The following ``beginWPSConfig`` function allows connecting to a network using `Wi-Fi Protected Setup (WPS) <https://en.wikipedia.org/wiki/Wi-Fi_Protected_Setup>`__. Currently only `push-button configuration <https://www.wi-fi.org/knowledge-center/faq/how-does-wi-fi-protected-setup-work>`__ (``WPS_TYPE_PBC`` mode) is supported (SDK 1.5.4).
 
 .. code:: cpp
 
@@ -644,13 +665,13 @@ The Smart Config connection of an ESP module an access point is done by sniffing
 
 The following three functions are provided to implement Smart Config.
 
-Start smart configuration mode by sniffing for special packets that contain SSID and password of desired Access Point. Depending on result either ``true`` or \`false is returned.
+Start smart configuration mode by sniffing for special packets that contain SSID and password of desired Access Point. Depending on result either ``true`` or ``false`` is returned.
 
 .. code:: cpp
 
     beginSmartConfig()
 
-Query Smart Config status, to decide when stop configuration. Function returns either ``true`` or ``false of``\ boolean\` type.
+Query Smart Config status, to decide when stop configuration. Function returns either ``true`` or ``false`` of ``boolean`` type.
 
 .. code:: cpp
 
@@ -662,4 +683,4 @@ Stop smart config, free the buffer taken by ``beginSmartConfig()``. Depending on
 
     stopSmartConfig()
 
-For additional details regarding Smart Config please refer to `ESP8266 API User Guide <http://bbs.espressif.com/viewtopic.php?f=51&t=1023>`__.
+For additional details regarding Smart Config please refer to `ESP8266 API User Guide <https://bbs.espressif.com/viewtopic.php?f=51&t=1023>`__.

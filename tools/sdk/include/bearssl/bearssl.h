@@ -39,6 +39,7 @@
  * | :-------------- | :------------------------------------------------ |
  * | bearssl_hash.h  | Hash functions                                    |
  * | bearssl_hmac.h  | HMAC                                              |
+ * | bearssl_kdf.h   | Key Derivation Functions                          |
  * | bearssl_rand.h  | Pseudorandom byte generators                      |
  * | bearssl_prf.h   | PRF implementations (for SSL/TLS)                 |
  * | bearssl_block.h | Symmetric encryption                              |
@@ -125,6 +126,7 @@
 
 #include "bearssl_hash.h"
 #include "bearssl_hmac.h"
+#include "bearssl_kdf.h"
 #include "bearssl_rand.h"
 #include "bearssl_prf.h"
 #include "bearssl_block.h"
@@ -134,7 +136,10 @@
 #include "bearssl_ssl.h"
 #include "bearssl_x509.h"
 #include "bearssl_pem.h"
-#include "bearssl_port.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** \brief Type for a configuration option.
  *
@@ -165,5 +170,14 @@ typedef struct {
  * \return  the configuration report.
  */
 const br_config_option *br_get_config(void);
+
+/* ======================================================================= */
+
+/** \brief Version feature: support for time callback. */
+#define BR_FEATURE_X509_TIME_CALLBACK   1
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

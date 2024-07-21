@@ -58,10 +58,14 @@ void sntp_set_system_time (uint32_t t);
 
 #include "mem.h" // useful for os_malloc used in esp-arduino's mDNS
 
-typedef uint32_t sys_prot_t;	// not really used
-#define SYS_ARCH_DECL_PROTECT(lev)
-#define SYS_ARCH_PROTECT(lev) os_intr_lock()
-#define SYS_ARCH_UNPROTECT(lev) os_intr_unlock()
+#include "glue.h" // include assembly locking macro used below
+typedef uint32_t sys_prot_t;
+#define SYS_ARCH_DECL_PROTECT(lev) sys_prot_t lev
+#define SYS_ARCH_PROTECT(lev) lev = lwip_xt_rsil(15)
+#define SYS_ARCH_UNPROTECT(lev) lwip_xt_wsr_ps(lev)
+#define sys_jiffies() (0) // only used for increased randomness in PPP
+
+#define LWIP_NO_CTYPE_H 1
 
 ///////////////////////////////
 //// DEBUG
@@ -81,7 +85,21 @@ typedef uint32_t sys_prot_t;	// not really used
 ///////////////////////////////
 //// MISSING 
 
-#define sys_now millis		// arduino wire millis() definition returns 32 bits like sys_now() does
+// Arduino Core exposes time func with a generic type
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+unsigned long millis(void);
+#ifdef __cplusplus
+}
+#endif
+
+// b/c we have conflicting typedefs of u32_t and ulong and can't substitute funcs,
+// forcibly cast the `millis()` result to lwip's version of u32_t
+// (previous version was `#define sys_now millis`)
+#define sys_now() ((u32_t)millis())
+
 #define LWIP_RAND r_rand	// old lwip uses this useful undocumented function
 #define IPSTR "%d.%d.%d.%d"
 #define IP2STR(ipaddr) ip4_addr1_16(ipaddr), \
@@ -89,15 +107,7 @@ typedef uint32_t sys_prot_t;	// not really used
     ip4_addr3_16(ipaddr), \
     ip4_addr4_16(ipaddr)
 
-// ip_addr / ip_info: do not exist in lwip2 (only in lwip1.4)
-struct ip_addr {
-  uint32_t addr;
-};
-struct ip_info {
-    struct ip_addr ip;
-    struct ip_addr netmask;
-    struct ip_addr gw;
-};
+#include <ipv4_addr.h>
 
 ///////////////////////////////
 //// PROVIDED TO USER

@@ -41,9 +41,8 @@ following three things right: 1. Module is provided with enough power,
 2. GPIO0, GPIO15 and CH\_PD are connected using pull up / pull down
 resistors, 3. Module is put into boot loader mode.
 
-For specific details please refer to section on `Generic ESP8266
-modules <../boards.rst#generic-esp8266-modules>`__. Example modules
-without USB to serial converter on board are shown below.
+For specific details please refer to section on `Generic ESP8266 module <../boards.rst#generic-esp8266-module>`__.
+Example modules without USB to serial converter on board are shown below.
 
 .. figure:: pictures/a01-example-boards-without-usb.png
    :alt: Example ESP8266 modules without USB to serial converter
@@ -264,7 +263,7 @@ by user [@mytrain](https://github.com/mytrain) and discussed in
 
 If you prefer external terminal program, then for Windows users we can
 recommend free and handy
-`Termite <http://www.compuphase.com/software_termite.htm>`__.
+`Termite <https://www.compuphase.com/software_termite.htm>`__.
 
 Nodemcu
 ^^^^^^^
@@ -313,14 +312,14 @@ example at 921600 baud, but with two reset retries.
 
    Reset Method: nodemcu, reset retries
 
-If you are interested how noodemcu reset method is implemented, then
+If you are interested how nodemcu reset method is implemented, then
 check circuit below. As indicated it does not pull to ground RTS and DTR
 lines once you open Serial Monitor in Arduino IDE.
 
 .. figure:: pictures/a01-nodemcu-reset-implementation.png
-   :alt: Implementation of noodemcu reset
+   :alt: Implementation of nodemcu reset
 
-   Implementation of noodemcu reset
+   Implementation of nodemcu reset
 
 It consists of two transistors and resistors that you can locate on
 NodeMCU board on right. On left you can see complete circuit and the
@@ -370,7 +369,7 @@ If this is still not the case, then review once more all discussed steps in the 
 
 * [ ] What is the name and version of your IDE and O/S?
 
-If you are stuck at certain step, then post this list on `ESP8266 Community Forum <http://www.esp8266.com/>`__ asking for support.
+If you are stuck at certain step, then post this list on `ESP8266 Community Forum <https://www.esp8266.com/>`__ asking for support.
 
 Conclusion
 ~~~~~~~~~~
@@ -389,7 +388,7 @@ detailed upload log for inconsistencies with IDE settings.
 Verify your connection diagram and wave-form for consistency with
 selected reset method.
 
-If you get stuck, then ask `community <http://www.esp8266.com/>`__ for
+If you get stuck, then ask `community <https://www.esp8266.com/>`__ for
 support providing summary of all completed checks.
 
 .. figure:: pictures/a01-test-stand.jpg

@@ -110,6 +110,10 @@
 #ifndef SPIFFS_NUCLEUS_H_
 #define SPIFFS_NUCLEUS_H_
 
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
 #define _SPIFFS_ERR_CHECK_FIRST         (SPIFFS_ERR_INTERNAL - 1)
 #define SPIFFS_ERR_CHECK_OBJ_ID_MISM    (SPIFFS_ERR_INTERNAL - 1)
 #define SPIFFS_ERR_CHECK_SPIX_MISM      (SPIFFS_ERR_INTERNAL - 2)
@@ -143,8 +147,8 @@
 
 
 
-#if defined(__GNUC__) || defined(__clang__)
-    /* For GCC and clang */
+#if defined(__GNUC__) || defined(__clang__) || defined(__TI_COMPILER_VERSION__)
+    /* For GCC, clang and TI compilers */
 #define SPIFFS_PACKED __attribute__((packed))
 #elif defined(__ICCARM__) || defined(__CC_ARM)
     /* For IAR ARM and Keil MDK-ARM compilers */
@@ -262,8 +266,8 @@
 #define SPIFFS_FH_OFFS(fs, fh)   ((fh) != 0 ? ((fh) + (fs)->cfg.fh_ix_offset) : 0)
 #define SPIFFS_FH_UNOFFS(fs, fh) ((fh) != 0 ? ((fh) - (fs)->cfg.fh_ix_offset) : 0)
 #else
-#define SPIFFS_FH_OFFS(fs, fh)   (fh)
-#define SPIFFS_FH_UNOFFS(fs, fh) (fh)
+#define SPIFFS_FH_OFFS(fs, fh)   ((spiffs_file)(fh))
+#define SPIFFS_FH_UNOFFS(fs, fh) ((spiffs_file)(fh))
 #endif
 
 
@@ -349,7 +353,7 @@
     if ((ph).span_ix != (spix)) return SPIFFS_ERR_DATA_SPAN_MISMATCH;
 
 
-// check id, only visit matching objec ids
+// check id, only visit matching object ids
 #define SPIFFS_VIS_CHECK_ID     (1<<0)
 // report argument object id to visitor - else object lookup id is reported
 #define SPIFFS_VIS_CHECK_PH     (1<<1)
@@ -838,5 +842,9 @@ s32_t spiffs_object_index_consistency_check(
 #define _SPIFFS_MEMCPY(__d, __s, __l) do{memcpy((__d),(__s),(__l));}while(0)
 #endif
 #endif //_SPIFFS_TEST
+
+#if defined(__cplusplus)
+};
+#endif
 
 #endif /* SPIFFS_NUCLEUS_H_ */

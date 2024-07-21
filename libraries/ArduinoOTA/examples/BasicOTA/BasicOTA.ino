@@ -3,8 +3,13 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 
-const char* ssid = "..........";
-const char* password = "..........";
+#ifndef STASSID
+#define STASSID "your-ssid"
+#define STAPSK "your-password"
+#endif
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
 
 void setup() {
   Serial.begin(115200);
@@ -34,11 +39,11 @@ void setup() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
       type = "sketch";
-    } else { // U_SPIFFS
+    } else {  // U_FS
       type = "filesystem";
     }
 
-    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
     Serial.println("Start updating " + type);
   });
   ArduinoOTA.onEnd([]() {

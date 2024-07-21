@@ -1,0 +1,51 @@
+# Whenever a tag of the form #.xxxx is pushed against master, generate a
+# draft release and upload the ZIP and JSON file to it.  Maintainers then
+# will manually add the changelist and publish it.
+
+name: ESP8266 Arduino Draft Release
+
+on:
+  push:
+    tags:
+      # Run for tags of the x.x.x* form (i.e. 3.0.0, 3.0.0-beta, etc.).
+      - '[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+    - name: Set GIT tag name
+      run: |
+        # Sets an environment variable used in the next steps
+        ESP8266_ARDUINO_RELEASE_TAG="$(git describe --exact-match --tags)"
+        echo "ESP8266_ARDUINO_RELEASE_TAG=${ESP8266_ARDUINO_RELEASE_TAG}" >> $GITHUB_ENV
+    - name: Build package JSON
+      env:
+        CI_GITHUB_API_KEY: ${{ secrets.GITHUB_TOKEN }}
+        BUILD_TYPE: package
+      run: |
+        bash ./tests/ci/build_package.sh
+        # Create a draft release and upload the ZIP and JSON files.
+        # This draft is not visible to normal users and needs to be
+        # updated manually with release notes and published from the
+        # GitHub web interface.
+        pip3 install PyGithub
+        python3 ./package/upload_release.py \
+          --user "$GITHUB_ACTOR" \
+          --repo "$GITHUB_REPOSITORY" \
+          --token "$CI_GITHUB_API_KEY" \
+          --tag "$ESP8266_ARDUINO_RELEASE_TAG" \
+          --name "Release ${ESP8266_ARDUINO_RELEASE_TAG}" \
+          --msg "Update the draft with release notes before publishing." \
+          package/versions/*/*.zip package/versions/*/package_esp8266com_index.json

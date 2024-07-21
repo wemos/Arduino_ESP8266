@@ -9,8 +9,13 @@
 #include <ArduinoOTA.h>
 #include <ESP8266WebServer.h>
 
-const char* ssid = "........";
-const char* password = "........";
+#ifndef STASSID
+#define STASSID "your-ssid"
+#define STAPSK "your-password"
+#endif
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
 
 ESP8266WebServer server(80);
 
@@ -34,13 +39,13 @@ void setup() {
 
   server.on("/", []() {
     if (!server.authenticate(www_username, www_password))
-      //Basic Auth Method with Custom realm and Failure Response
-      //return server.requestAuthentication(BASIC_AUTH, www_realm, authFailResponse);
-      //Digest Auth Method with realm="Login Required" and empty Failure Response
-      //return server.requestAuthentication(DIGEST_AUTH);
-      //Digest Auth Method with Custom realm and empty Failure Response
-      //return server.requestAuthentication(DIGEST_AUTH, www_realm);
-      //Digest Auth Method with Custom realm and Failure Response
+    // Basic Auth Method with Custom realm and Failure Response
+    // return server.requestAuthentication(BASIC_AUTH, www_realm, authFailResponse);
+    // Digest Auth Method with realm="Login Required" and empty Failure Response
+    // return server.requestAuthentication(DIGEST_AUTH);
+    // Digest Auth Method with Custom realm and empty Failure Response
+    // return server.requestAuthentication(DIGEST_AUTH, www_realm);
+    // Digest Auth Method with Custom realm and Failure Response
     {
       return server.requestAuthentication(DIGEST_AUTH, www_realm, authFailResponse);
     }

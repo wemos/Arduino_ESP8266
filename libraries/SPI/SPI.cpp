@@ -161,6 +161,11 @@ void SPIClass::setDataMode(uint8_t dataMode) {
     bool CPOL = (dataMode & 0x10); ///< CPOL (Clock Polarity)
     bool CPHA = (dataMode & 0x01); ///< CPHA (Clock Phase)
 
+    // https://github.com/esp8266/Arduino/issues/2416
+    // https://github.com/esp8266/Arduino/pull/2418
+    if(CPOL)          // Ensure same behavior as
+        CPHA ^= 1;    // SAM, AVR and Intel Boards
+
     if(CPHA) {
         SPI1U |= (SPIUSME);
     } else {
@@ -198,6 +203,7 @@ void SPIClass::setFrequency(uint32_t freq) {
     static uint32_t lastSetRegister = 0;
 
     if(freq >= ESP8266_CLOCK) {
+        // magic number to set spi sysclock bit (see below.)
         setClockDivider(0x80000000);
         return;
     }
@@ -207,10 +213,10 @@ void SPIClass::setFrequency(uint32_t freq) {
         return;
     }
 
-    const spiClk_t minFreqReg = { 0x7FFFF000 };
+    const spiClk_t minFreqReg = { 0x7FFFF020 };
     uint32_t minFreq = ClkRegToFreq((spiClk_t*) &minFreqReg);
     if(freq < minFreq) {
-        // use minimum possible clock
+        // use minimum possible clock regardless
         setClockDivider(minFreqReg.regValue);
         lastSetRegister = SPI1CLK;
         lastSetFrequency = freq;
@@ -222,8 +228,14 @@ void SPIClass::setFrequency(uint32_t freq) {
     spiClk_t bestReg = { 0 };
     int32_t bestFreq = 0;
 
-    // find the best match
-    while(calN <= 0x3F) { // 0x3F max for N
+    // aka 0x3F, aka 63, max for regN:6
+    const uint8_t regNMax = (1 << 6) - 1;
+
+    // aka 0x1fff, aka 8191, max for regPre:13
+    const int32_t regPreMax = (1 << 13) - 1;
+
+    // find the best match for the next 63 iterations
+    while(calN <= regNMax) {
 
         spiClk_t reg = { 0 };
         int32_t calFreq;
@@ -234,8 +246,8 @@ void SPIClass::setFrequency(uint32_t freq) {
 
         while(calPreVari++ <= 1) { // test different variants for Pre (we calculate in int so we miss the decimals, testing is the easyest and fastest way)
             calPre = (((ESP8266_CLOCK / (reg.regN + 1)) / freq) - 1) + calPreVari;
-            if(calPre > 0x1FFF) {
-                reg.regPre = 0x1FFF; // 8191
+            if(calPre > regPreMax) {
+                reg.regPre = regPreMax;
             } else if(calPre <= 0) {
                 reg.regPre = 0;
             } else {
@@ -249,19 +261,21 @@ void SPIClass::setFrequency(uint32_t freq) {
             calFreq = ClkRegToFreq(&reg);
             //os_printf("-----[0x%08X][%d]\t EQU: %d\t Pre: %d\t N: %d\t H: %d\t L: %d = %d\n", reg.regValue, freq, reg.regEQU, reg.regPre, reg.regN, reg.regH, reg.regL, calFreq);
 
-            if(calFreq == (int32_t) freq) {
+            if(calFreq == static_cast<int32_t>(freq)) {
                 // accurate match use it!
                 memcpy(&bestReg, &reg, sizeof(bestReg));
                 break;
-            } else if(calFreq < (int32_t) freq) {
+            } else if(calFreq < static_cast<int32_t>(freq)) {
                 // never go over the requested frequency
-                if(abs(freq - calFreq) < abs(freq - bestFreq)) {
+                auto cal = std::abs(static_cast<int32_t>(freq) - calFreq);
+                auto best = std::abs(static_cast<int32_t>(freq) - bestFreq);
+                if(cal < best) {
                     bestFreq = calFreq;
                     memcpy(&bestReg, &reg, sizeof(bestReg));
                 }
             }
         }
-        if(calFreq == (int32_t) freq) {
+        if(calFreq == static_cast<int32_t>(freq)) {
             // accurate match use it!
             break;
         }
@@ -501,17 +515,16 @@ void SPIClass::writePattern(const uint8_t * data, uint8_t size, uint32_t repeat)
         }
     }
     //End orig
-    setDataBits(repeatRem * 8);
-    SPI1CMD |= SPIBUSY;
-    while(SPI1CMD & SPIBUSY) {}
+    if (repeatRem) {
+        setDataBits(repeatRem * 8);
+        SPI1CMD |= SPIBUSY;
+        while(SPI1CMD & SPIBUSY) {}
+    }
 
     SPI1U = SPIUMOSI | SPIUDUPLEX | SPIUSSE;
 }
 
 /**
- * Note:
- *  in and out need to be aligned to 32Bit
- *  or you get an Fatal exception (9)
  * @param out uint8_t *
  * @param in  uint8_t *
  * @param size uint32_t
@@ -538,44 +551,72 @@ void SPIClass::transferBytes(const uint8_t * out, uint8_t * in, uint32_t size) {
  * @param in  uint8_t *
  * @param size uint8_t (max 64)
  */
-void SPIClass::transferBytes_(const uint8_t * out, uint8_t * in, uint8_t size) {
+
+void SPIClass::transferBytesAligned_(const uint8_t * out, uint8_t * in, uint8_t size) {
+    if (!size)
+        return;
+
     while(SPI1CMD & SPIBUSY) {}
     // Set in/out Bits to transfer
 
     setDataBits(size * 8);
 
-    volatile uint32_t * fifoPtr = &SPI1W0;
-    uint8_t dataSize = ((size + 3) / 4);
+    volatile uint32_t *fifoPtr = &SPI1W0;
 
-    if(out) {
-        uint32_t * dataPtr = (uint32_t*) out;
-        while(dataSize--) {
-            *fifoPtr = *dataPtr;
-            dataPtr++;
-            fifoPtr++;
+    if (out) {
+        uint8_t outSize = ((size + 3) / 4);
+        uint32_t *dataPtr = (uint32_t*) out;
+        while (outSize--) {
+            *(fifoPtr++) = *(dataPtr++);
         }
     } else {
+        uint8_t outSize = ((size + 3) / 4);
         // no out data only read fill with dummy data!
-        while(dataSize--) {
-            *fifoPtr = 0xFFFFFFFF;
-            fifoPtr++;
+        while (outSize--) {
+            *(fifoPtr++) = 0xFFFFFFFF;
         }
     }
 
     SPI1CMD |= SPIBUSY;
     while(SPI1CMD & SPIBUSY) {}
 
-    if(in) {
-        uint32_t * dataPtr = (uint32_t*) in;
+    if (in) {
+        uint32_t *dataPtr = (uint32_t*) in;
         fifoPtr = &SPI1W0;
-        dataSize = ((size + 3) / 4);
-        while(dataSize--) {
-            *dataPtr = *fifoPtr;
-            dataPtr++;
-            fifoPtr++;
+        int inSize = size;
+        // Unlike outSize above, inSize tracks *bytes* since we must transfer only the requested bytes to the app to avoid overwriting other vars.
+        while (inSize >= 4) {
+            *(dataPtr++) = *(fifoPtr++);
+            inSize -= 4;
+            in += 4;
+        }
+        volatile uint8_t *fifoPtrB = (volatile uint8_t *)fifoPtr;
+        while (inSize--) {
+            *(in++) = *(fifoPtrB++);
         }
     }
 }
+
+
+void SPIClass::transferBytes_(const uint8_t * out, uint8_t * in, uint8_t size) {
+    if (!((uint32_t)out & 3) && !((uint32_t)in & 3)) {
+        // Input and output are both 32b aligned or NULL
+        transferBytesAligned_(out, in, size);
+    } else {
+        // HW FIFO has 64b limit and ::transferBytes breaks up large xfers into 64byte chunks before calling this function
+        // We know at this point at least one direction is misaligned, so use temporary buffer to align everything
+        // No need for separate out and in aligned copies, we can overwrite our out copy with the input data safely
+        uint8_t aligned[64]; // Stack vars will be 32b aligned
+        if (out) {
+            memcpy(aligned, out, size);
+        }
+        transferBytesAligned_(out ? aligned : nullptr, in ? aligned : nullptr, size);
+        if (in) {
+            memcpy(in, aligned, size);
+        }
+    }
+}
+
 
 #if !defined(NO_GLOBAL_INSTANCES) && !defined(NO_GLOBAL_SPI)
 SPIClass SPI;

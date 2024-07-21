@@ -1,5 +1,11 @@
 :orphan:
 
+IDE example
+^^^^^^^^^^^
+
+- For the currently installed Core, see Arduino IDE > *Examples* > *ESP8266WiFi* > *WiFiScan*.
+- For the latest development version, see `WiFiScan.ino <https://github.com/esp8266/Arduino/blob/master/libraries/ESP8266WiFi/examples/WiFiScan/WiFiScan.ino>`__.
+
 Scan
 ~~~~
 
@@ -206,7 +212,7 @@ Complete sketch is below. The code inside ``setup()`` is the same as described i
         lastScanMillis = currentMillis;
       }
 
-      // print out Wi-Fi network scan result uppon completion
+      // print out Wi-Fi network scan result upon completion
       int n = WiFi.scanComplete();
       if(n >= 0)
       {

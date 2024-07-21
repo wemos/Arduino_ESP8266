@@ -20,6 +20,7 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include "BearSSLHelpers.h"
 #include <memory>
 #include <vector>
 #include <bearssl/bearssl.h>
@@ -27,7 +28,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <Arduino.h>
-#include "BearSSLHelpers.h"
+#include <StackThunk.h>
+#include <Updater_Signing.h>
+#ifndef ARDUINO_SIGNING
+  #define ARDUINO_SIGNING 0
+#endif
 
 namespace brssl {
   // Code here is pulled from brssl sources, with the copyright and license
@@ -229,6 +234,8 @@ namespace brssl {
     if (po) {
       free(po->name);
       free(po->data);
+      po->name = nullptr;
+      po->data = nullptr;
     }
   }
 
@@ -450,6 +457,7 @@ namespace brssl {
         }
         memcpy(pk->key.ec.q, ek->q, ek->qlen);
         pk->key.ec.qlen = ek->qlen;
+        pk->key.ec.curve = ek->curve;
         return pk;
 
       default:
@@ -519,6 +527,10 @@ namespace brssl {
       case BR_KEYTYPE_EC:
         ek = br_skey_decoder_get_ec(dc.get());
         sk = (private_key*)malloc(sizeof * sk);
+        if (!sk)
+        {
+          return nullptr;
+        }
         sk->key_type = BR_KEYTYPE_EC;
         sk->key.ec.curve = ek->curve;
         sk->key.ec.x = (uint8_t*)malloc(ek->xlen);
@@ -619,36 +631,59 @@ namespace brssl {
     return pk;
   }
 
+  static uint8_t *loadStream(Stream& stream, size_t size) {
+    uint8_t *dest = (uint8_t *)malloc(size);
+    if (!dest) {
+      return nullptr;  // OOM error
+    }
+    if (size != stream.readBytes(dest, size)) {
+      free(dest);  // Error during read
+      return nullptr;
+    }
+    return dest;
+  }
 };
+
+
+namespace BearSSL {
 
 
 // ----- Public Key -----
 
-BearSSLPublicKey::BearSSLPublicKey() {
+PublicKey::PublicKey() {
   _key = nullptr;
 }
 
-BearSSLPublicKey::BearSSLPublicKey(const char *pemKey) {
+PublicKey::PublicKey(const char *pemKey) {
   _key = nullptr;
   parse(pemKey);
 }
 
-BearSSLPublicKey::BearSSLPublicKey(const uint8_t *derKey, size_t derLen) {
+PublicKey::PublicKey(const uint8_t *derKey, size_t derLen) {
   _key = nullptr;
   parse(derKey, derLen);
 }
 
-BearSSLPublicKey::~BearSSLPublicKey() {
+PublicKey::PublicKey(Stream &stream, size_t size) {
+  _key = nullptr;
+  auto buff = brssl::loadStream(stream, size);
+  if (buff) {
+    parse(buff, size);
+    free(buff);
+  }
+}
+
+PublicKey::~PublicKey() {
   if (_key) {
     brssl::free_public_key(_key);
   }
 }
 
-bool BearSSLPublicKey::parse(const char *pemKey) {
+bool PublicKey::parse(const char *pemKey) {
   return parse((const uint8_t *)pemKey, strlen_P(pemKey));
 }
 
-bool BearSSLPublicKey::parse(const uint8_t *derKey, size_t derLen) {
+bool PublicKey::parse(const uint8_t *derKey, size_t derLen) {
   if (_key) {
     brssl::free_public_key(_key);
     _key = nullptr;
@@ -657,28 +692,28 @@ bool BearSSLPublicKey::parse(const uint8_t *derKey, size_t derLen) {
   return _key ? true : false;
 }
 
-bool BearSSLPublicKey::isRSA() const {
+bool PublicKey::isRSA() const {
   if (!_key || _key->key_type != BR_KEYTYPE_RSA) {
     return false;
   }
   return true;
 }
 
-bool BearSSLPublicKey::isEC() const {
+bool PublicKey::isEC() const {
   if (!_key || _key->key_type != BR_KEYTYPE_EC) {
     return false;
   }
   return true;
 }
 
-const br_rsa_public_key *BearSSLPublicKey::getRSA() const {
+const br_rsa_public_key *PublicKey::getRSA() const {
   if (!_key || _key->key_type != BR_KEYTYPE_RSA) {
     return nullptr;
   }
   return &_key->key.rsa;
 }
 
-const br_ec_public_key *BearSSLPublicKey::getEC() const {
+const br_ec_public_key *PublicKey::getEC() const {
   if (!_key || _key->key_type != BR_KEYTYPE_EC) {
     return nullptr;
   }
@@ -687,31 +722,40 @@ const br_ec_public_key *BearSSLPublicKey::getEC() const {
 
 // ----- Private Key -----
 
-BearSSLPrivateKey::BearSSLPrivateKey() {
+PrivateKey::PrivateKey() {
   _key = nullptr;
 }
 
-BearSSLPrivateKey::BearSSLPrivateKey(const char *pemKey) {
+PrivateKey::PrivateKey(const char *pemKey) {
   _key = nullptr;
   parse(pemKey);
 }
 
-BearSSLPrivateKey::BearSSLPrivateKey(const uint8_t *derKey, size_t derLen) {
+PrivateKey::PrivateKey(const uint8_t *derKey, size_t derLen) {
   _key = nullptr;
   parse(derKey, derLen);
 }
 
-BearSSLPrivateKey::~BearSSLPrivateKey() {
+PrivateKey::PrivateKey(Stream &stream, size_t size) {
+  _key = nullptr;
+  auto buff = brssl::loadStream(stream, size);
+  if (buff) {
+    parse(buff, size);
+    free(buff);
+  }
+}
+
+PrivateKey::~PrivateKey() {
   if (_key) {
     brssl::free_private_key(_key);
   }
 }
 
-bool BearSSLPrivateKey::parse(const char *pemKey) {
+bool PrivateKey::parse(const char *pemKey) {
   return parse((const uint8_t *)pemKey, strlen_P(pemKey));
 }
 
-bool BearSSLPrivateKey::parse(const uint8_t *derKey, size_t derLen) {
+bool PrivateKey::parse(const uint8_t *derKey, size_t derLen) {
   if (_key) {
     brssl::free_private_key(_key);
     _key = nullptr;
@@ -720,41 +764,43 @@ bool BearSSLPrivateKey::parse(const uint8_t *derKey, size_t derLen) {
   return _key ? true : false;
 }
 
-bool BearSSLPrivateKey::isRSA() const {
+bool PrivateKey::isRSA() const {
   if (!_key || _key->key_type != BR_KEYTYPE_RSA) {
     return false;
   }
   return true;
 }
 
-bool BearSSLPrivateKey::isEC() const {
+bool PrivateKey::isEC() const {
   if (!_key || _key->key_type != BR_KEYTYPE_EC) {
     return false;
   }
   return true;
 }
 
-const br_rsa_private_key *BearSSLPrivateKey::getRSA() const {
+const br_rsa_private_key *PrivateKey::getRSA() const {
   if (!_key || _key->key_type != BR_KEYTYPE_RSA) {
     return nullptr;
   }
   return &_key->key.rsa;
 }
 
-const br_ec_private_key *BearSSLPrivateKey::getEC() const {
+const br_ec_private_key *PrivateKey::getEC() const {
   if (!_key || _key->key_type != BR_KEYTYPE_EC) {
     return nullptr;
   }
   return &_key->key.ec;
 }
 
-BearSSLX509List::BearSSLX509List() {
+// ----- Certificate Lists -----
+
+X509List::X509List() {
   _count = 0;
   _cert = nullptr;
   _ta = nullptr;
 }
 
-BearSSLX509List::BearSSLX509List(const char *pemCert) {
+X509List::X509List(const char *pemCert) {
   _count = 0;
   _cert = nullptr;
   _ta = nullptr;
@@ -762,14 +808,25 @@ BearSSLX509List::BearSSLX509List(const char *pemCert) {
 }
 
 
-BearSSLX509List::BearSSLX509List(const uint8_t *derCert, size_t derLen) {
+X509List::X509List(const uint8_t *derCert, size_t derLen) {
   _count = 0;
   _cert = nullptr;
   _ta = nullptr;
   append(derCert, derLen);
 }
 
-BearSSLX509List::~BearSSLX509List() {
+X509List::X509List(Stream &stream, size_t size) {
+  _count = 0;
+  _cert = nullptr;
+  _ta = nullptr;
+  auto buff = brssl::loadStream(stream, size);
+  if (buff) {
+    append(buff, size);
+    free(buff);
+  }
+}
+
+X509List::~X509List() {
   brssl::free_certificates(_cert, _count); // also frees cert
   for (size_t i = 0; i < _count; i++) {
     brssl::free_ta_contents(&_ta[i]);
@@ -777,11 +834,11 @@ BearSSLX509List::~BearSSLX509List() {
   free(_ta);
 }
 
-bool BearSSLX509List::append(const char *pemCert) {
+bool X509List::append(const char *pemCert) {
   return append((const uint8_t *)pemCert, strlen_P(pemCert));
 }
 
-bool BearSSLX509List::append(const uint8_t *derCert, size_t derLen) {
+bool X509List::append(const uint8_t *derCert, size_t derLen) {
   size_t numCerts;
   br_x509_certificate *newCerts = brssl::read_certificates((const char *)derCert, derLen, &numCerts);
   if (!newCerts) {
@@ -819,3 +876,127 @@ bool BearSSLX509List::append(const uint8_t *derCert, size_t derLen) {
 
   return true;
 }
+
+ServerSessions::~ServerSessions() {
+  if (_isDynamic && _store != nullptr)
+    delete _store;
+}
+
+ServerSessions::ServerSessions(ServerSession *sessions, uint32_t size, bool isDynamic) :
+  _size(sessions != nullptr ? size : 0),
+  _store(sessions), _isDynamic(isDynamic) {
+    if (_size > 0)
+      br_ssl_session_cache_lru_init(&_cache, (uint8_t*)_store, size * sizeof(ServerSession));
+}
+
+const br_ssl_session_cache_class **ServerSessions::getCache() {
+  return _size > 0 ? &_cache.vtable : nullptr;
+}
+
+// SHA256 hash for updater
+void HashSHA256::begin() {
+  br_sha256_init( &_cc );
+  memset( _sha256, 0, sizeof(_sha256) );
+}
+
+void HashSHA256::add(const void *data, uint32_t len) {
+  br_sha256_update( &_cc, data, len );
+}
+
+void HashSHA256::end() {
+  br_sha256_out( &_cc, _sha256 );
+}
+
+int HashSHA256::len() {
+  return sizeof(_sha256);
+}
+
+const void *HashSHA256::hash() {
+  return (const void*) _sha256;
+}
+
+const unsigned char *HashSHA256::oid() {
+    return BR_HASH_OID_SHA256;
+}
+
+// SHA256 verifier
+uint32_t SigningVerifier::length()
+{
+  if (!_pubKey) {
+    return 0;
+  } else if (_pubKey->isRSA()) {
+    return _pubKey->getRSA()->nlen;
+  } else if (_pubKey->isEC()) {
+    return _pubKey->getEC()->qlen;
+  } else {
+    return 0;
+  }
+}
+
+// We need to use the 2nd stack to do a verification, so do the thunk
+// directly inside the class function for ease of use.
+extern "C" bool SigningVerifier_verify(PublicKey *_pubKey, UpdaterHashClass *hash, const void *signature, uint32_t signatureLen) {
+  if (_pubKey->isRSA()) {
+    // see https://github.com/earlephilhower/bearssl-esp8266/blob/6105635531027f5b298aa656d44be2289b2d434f/inc/bearssl_rsa.h#L257
+    static constexpr int HashLengthMax = 64;
+    unsigned char vrf[HashLengthMax];
+    if (hash->len() > HashLengthMax) {
+      return false;
+    }
+    br_rsa_pkcs1_vrfy vrfy = br_rsa_pkcs1_vrfy_get_default();
+    bool ret = vrfy((const unsigned char *)signature, signatureLen, hash->oid(), hash->len(), _pubKey->getRSA(), vrf);
+    if (!ret || memcmp(vrf, hash->hash(), std::min(HashLengthMax, hash->len())) ) {
+      return false;
+    } else {
+      return true;
+    }
+  } else {
+    br_ecdsa_vrfy vrfy = br_ecdsa_vrfy_raw_get_default();
+    // The EC verifier actually does the compare, unlike the RSA one
+    return vrfy(br_ec_get_default(), hash->hash(), hash->len(), _pubKey->getEC(), (const unsigned char *)signature, signatureLen);
+  }
+};
+
+#if !CORE_MOCK
+make_stack_thunk(SigningVerifier_verify);
+extern "C" bool thunk_SigningVerifier_verify(PublicKey *_pubKey, UpdaterHashClass *hash, const void *signature, uint32_t signatureLen);
+#endif
+
+bool SigningVerifier::verify(UpdaterHashClass *hash, const void *signature, uint32_t signatureLen) {
+  if (!_pubKey || !hash || !signature || signatureLen != length()) return false;
+#if !CORE_MOCK
+    return thunk_SigningVerifier_verify(_pubKey, hash, signature, signatureLen);
+#else
+    return SigningVerifier_verify(_pubKey, hash, signature, signatureLen);
+#endif
+}
+
+#if !CORE_MOCK
+
+// Second stack thunked helpers
+make_stack_thunk(br_ssl_engine_recvapp_ack);
+make_stack_thunk(br_ssl_engine_recvapp_buf);
+make_stack_thunk(br_ssl_engine_recvrec_ack);
+make_stack_thunk(br_ssl_engine_recvrec_buf);
+make_stack_thunk(br_ssl_engine_sendapp_ack);
+make_stack_thunk(br_ssl_engine_sendapp_buf);
+make_stack_thunk(br_ssl_engine_sendrec_ack);
+make_stack_thunk(br_ssl_engine_sendrec_buf);
+
+#endif
+
+};
+
+#if ARDUINO_SIGNING
+namespace {
+  static BearSSL::PublicKey signingPubKey(signing_pubkey);
+  static BearSSL::HashSHA256 __signingHash;
+  static BearSSL::SigningVerifier __signingVerifier(&signingPubKey);
+};
+
+namespace esp8266 {
+  UpdaterHashClass& updaterSigningHash = __signingHash;
+  UpdaterVerifyClass& updaterSigningVerifier = __signingVerifier;
+};
+#endif
+

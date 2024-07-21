@@ -23,6 +23,8 @@
  $Id$
  */
 
+#include "Arduino.h"
+
 extern "C" {
 #include <stdlib.h>
 }
@@ -70,17 +72,17 @@ long secureRandom(long howsmall, long howbig) {
 }
 
 long map(long x, long in_min, long in_max, long out_min, long out_max) {
-    long divisor = (in_max - in_min);
-    if(divisor == 0){
-        return -1; //AVR returns -1, SAM returns 0
-    }
-    return (x - in_min) * (out_max - out_min) / divisor + out_min;
+    const long dividend = out_max - out_min;
+    const long divisor = in_max - in_min;
+    const long delta = x - in_min;
+
+    return (delta * dividend + (divisor / 2)) / divisor + out_min;
 }
 
-unsigned int makeWord(unsigned int w) {
+uint16_t makeWord(uint16_t w) {
     return w;
 }
 
-unsigned int makeWord(unsigned char h, unsigned char l) {
+uint16_t makeWord(byte h, byte l) {
     return (h << 8) | l;
 }

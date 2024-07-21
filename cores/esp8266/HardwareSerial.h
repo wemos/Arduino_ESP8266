@@ -28,6 +28,7 @@
 #define HardwareSerial_h
 
 #include <inttypes.h>
+#include <../include/time.h> // See issue #6714
 #include "Stream.h"
 #include "uart.h"
 
@@ -72,95 +73,126 @@ public:
 
     void begin(unsigned long baud)
     {
-        begin(baud, SERIAL_8N1, SERIAL_FULL, 1);
+        begin(baud, SERIAL_8N1, SERIAL_FULL, 1, false);
     }
     void begin(unsigned long baud, SerialConfig config)
     {
-        begin(baud, config, SERIAL_FULL, 1);
+        begin(baud, config, SERIAL_FULL, 1, false);
     }
     void begin(unsigned long baud, SerialConfig config, SerialMode mode)
     {
-        begin(baud, config, mode, 1);
+        begin(baud, config, mode, 1, false);
     }
 
-    void begin(unsigned long baud, SerialConfig config, SerialMode mode, uint8_t tx_pin);
+    void begin(unsigned long baud, SerialConfig config, SerialMode mode, uint8_t tx_pin)
+    {
+        begin(baud, config, mode, tx_pin, false);
+    }
+
+    void begin(unsigned long baud, SerialConfig config, SerialMode mode, uint8_t tx_pin, bool invert);
 
     void end();
 
-    size_t setRxBufferSize(size_t size);
+    void updateBaudRate(unsigned long baud);
 
-    void swap()
+    size_t setRxBufferSize(size_t size);
+    size_t getRxBufferSize()
     {
-        swap(1);
+        return uart_get_rx_buffer_size(_uart);
     }
-    void swap(uint8_t tx_pin)    //toggle between use of GPIO13/GPIO15 or GPIO3/GPIO(1/2) as RX and TX
+
+    bool swap()
     {
-        uart_swap(_uart, tx_pin);
+        return swap(1);
+    }
+    bool swap(uint8_t tx_pin)    //toggle between use of GPIO13/GPIO15 or GPIO3/GPIO(1/2) as RX and TX
+    {
+        return uart_swap(_uart, tx_pin);
     }
 
     /*
      * Toggle between use of GPIO1 and GPIO2 as TX on UART 0.
      * Note: UART 1 can't be used if GPIO2 is used with UART 0!
      */
-    void set_tx(uint8_t tx_pin)
+    bool set_tx(uint8_t tx_pin)
     {
-        uart_set_tx(_uart, tx_pin);
+        return uart_set_tx(_uart, tx_pin);
     }
 
     /*
      * UART 0 possible options are (1, 3), (2, 3) or (15, 13)
      * UART 1 allows only TX on 2 if UART 0 is not (2, 3)
      */
-    void pins(uint8_t tx, uint8_t rx)
+    bool pins(uint8_t tx, uint8_t rx)
     {
-        uart_set_pins(_uart, tx, rx);
+        return uart_set_pins(_uart, tx, rx);
     }
 
     int available(void) override;
 
     int peek(void) override
     {
-        // this may return -1, but that's okay
+        // return -1 when data is unavailable (arduino api)
         return uart_peek_char(_uart);
     }
+
+    virtual bool hasPeekBufferAPI () const override
+    {
+        return true;
+    }
+
+    // return a pointer to available data buffer (size = available())
+    // semantic forbids any kind of read() before calling peekConsume()
+    const char* peekBuffer () override
+    {
+        return uart_peek_buffer(_uart);
+    }
+
+    // return number of byte accessible by peekBuffer()
+    size_t peekAvailable () override
+    {
+        return uart_peek_available(_uart);
+    }
+
+    // consume bytes after use (see peekBuffer)
+    void peekConsume (size_t consume) override
+    {
+        return uart_peek_consume(_uart, consume);
+    }
+
     int read(void) override
     {
-        // this may return -1, but that's okay
+        // return -1 when data is unavailable (arduino api)
         return uart_read_char(_uart);
     }
-    int availableForWrite(void)
+    // ::read(buffer, size): same as readBytes without timeout
+    int read(char* buffer, size_t size)
+    {
+        return uart_read(_uart, buffer, size);
+    }
+    int read(uint8_t* buffer, size_t size) override
+    {
+        return uart_read(_uart, (char*)buffer, size);
+    }
+    size_t readBytes(char* buffer, size_t size) override;
+    size_t readBytes(uint8_t* buffer, size_t size) override
+    {
+        return readBytes((char*)buffer, size);
+    }
+    int availableForWrite(void) override
     {
         return static_cast<int>(uart_tx_free(_uart));
     }
-    void flush(void) override;
+    void flush(void) override; // wait for all outgoing characters to be sent, output buffer is empty after this call
     size_t write(uint8_t c) override
     {
         return uart_write_char(_uart, c);
     }
-    inline size_t write(unsigned long n)
-    {
-        return write((uint8_t) n);
-    }
-    inline size_t write(long n)
-    {
-        return write((uint8_t) n);
-    }
-    inline size_t write(unsigned int n)
-    {
-        return write((uint8_t) n);
-    }
-    inline size_t write(int n)
-    {
-        return write((uint8_t) n);
-    }
-    size_t write(const uint8_t *buffer, size_t size)
+    size_t write(const uint8_t *buffer, size_t size) override
     {
         return uart_write(_uart, (const char*)buffer, size);
     }
-    size_t write(const char *buffer)
-    {
-        return buffer? uart_write(_uart, buffer, strlen(buffer)): 0;
-    }
+    using Print::write; // Import other write() methods to support things like write(0) properly
     operator bool() const
     {
         return _uart != 0;
@@ -184,6 +216,11 @@ public:
         return uart_has_overrun(_uart);
     }
 
+    bool hasRxError(void)
+    {
+        return uart_has_rx_error(_uart);
+    }
+
     void startDetectBaudrate();
 
     unsigned long testBaudrate();
@@ -196,7 +233,13 @@ protected:
     size_t _rx_size;
 };
 
+#if !defined(NO_GLOBAL_INSTANCES) && !defined(NO_GLOBAL_SERIAL)
 extern HardwareSerial Serial;
+#endif
+#if !defined(NO_GLOBAL_INSTANCES) && !defined(NO_GLOBAL_SERIAL1)
 extern HardwareSerial Serial1;
+#endif
+
+extern void serialEventRun(void) __attribute__((weak));
 
 #endif

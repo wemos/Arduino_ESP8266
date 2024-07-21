@@ -72,12 +72,9 @@ AVRISPState_t ESP8266AVRISP::update() {
     switch (_state) {
         case AVRISP_STATE_IDLE: {
             if (_server.hasClient()) {
-                _client = _server.available();
+                _client = _server.accept();
                 _client.setNoDelay(true);
-                ip_addr_t lip;
-                lip.addr = _client.remoteIP();
-                AVRISP_DEBUG("client connect %d.%d.%d.%d:%d", IP2STR(&lip), _client.remotePort());
-                (void) lip; // Avoid unused warning when not in debug mode
+                AVRISP_DEBUG("client connect %s:%d", _client.remoteIP().toString().c_str(), _client.remotePort());
                 _client.setTimeout(100); // for getch()
                 _state = AVRISP_STATE_PENDING;
                 _reject_incoming();
@@ -110,10 +107,9 @@ AVRISPState_t ESP8266AVRISP::serve() {
         case AVRISP_STATE_IDLE:
             // should not be called when idle, error?
             break;
-        case AVRISP_STATE_PENDING: {
+        case AVRISP_STATE_PENDING:
             _state = AVRISP_STATE_ACTIVE;
-        // fallthrough
-        }
+            // falls through
         case AVRISP_STATE_ACTIVE: {
             while (_client.available()) {
                 avrisp();
@@ -125,7 +121,7 @@ AVRISPState_t ESP8266AVRISP::serve() {
 }
 
 inline void ESP8266AVRISP::_reject_incoming(void) {
-    while (_server.hasClient()) _server.available().stop();
+    while (_server.hasClient()) _server.accept().stop();
 }
 
 uint8_t ESP8266AVRISP::getch() {
@@ -193,7 +189,7 @@ void ESP8266AVRISP::get_parameter(uint8_t c) {
 }
 
 void ESP8266AVRISP::set_parameters() {
-    // call this after reading paramter packet into buff[]
+    // call this after reading parameter packet into buff[]
     param.devicecode = buff[0];
     param.revision   = buff[1];
     param.progtype   = buff[2];
@@ -363,8 +359,12 @@ uint8_t ESP8266AVRISP::flash_read(uint8_t hilo, int addr) {
                            0);
 }
 
-void ESP8266AVRISP::flash_read_page(int length) {
+bool ESP8266AVRISP::flash_read_page(int length) {
     uint8_t *data = (uint8_t *) malloc(length + 1);
+    if (!data)
+    {
+        return false;
+    }
     for (int x = 0; x < length; x += 2) {
         *(data + x) = flash_read(LOW, here);
         *(data + x + 1) = flash_read(HIGH, here);
@@ -373,12 +373,16 @@ void ESP8266AVRISP::flash_read_page(int length) {
     *(data + length) = Resp_STK_OK;
     _client.write((const uint8_t *)data, (size_t)(length + 1));
     free(data);
-    return;
+    return true;
 }
 
-void ESP8266AVRISP::eeprom_read_page(int length) {
+bool ESP8266AVRISP::eeprom_read_page(int length) {
     // here again we have a word address
     uint8_t *data = (uint8_t *) malloc(length + 1);
+    if (!data)
+    {
+        return false;
+    }
     int start = here * 2;
     for (int x = 0; x < length; x++) {
         int addr = start + x;
@@ -388,7 +392,7 @@ void ESP8266AVRISP::eeprom_read_page(int length) {
     *(data + length) = Resp_STK_OK;
     _client.write((const uint8_t *)data, (size_t)(length + 1));
     free(data);
-    return;
+    return true;
 }
 
 void ESP8266AVRISP::read_page() {

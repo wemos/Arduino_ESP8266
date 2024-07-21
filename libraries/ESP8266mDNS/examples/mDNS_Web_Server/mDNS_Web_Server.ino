@@ -20,8 +20,13 @@
 #include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 
-const char* ssid = "............";
-const char* password = "..............";
+#ifndef STASSID
+#define STASSID "your-ssid"
+#define STAPSK "your-password"
+#endif
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
 
 // TCP server at port 80 will respond to HTTP requests
 WiFiServer server(80);
@@ -52,9 +57,7 @@ void setup(void) {
   //   we send our IP address on the WiFi network
   if (!MDNS.begin("esp8266")) {
     Serial.println("Error setting up MDNS responder!");
-    while (1) {
-      delay(1000);
-    }
+    while (1) { delay(1000); }
   }
   Serial.println("mDNS responder started");
 
@@ -67,18 +70,17 @@ void setup(void) {
 }
 
 void loop(void) {
+
+  MDNS.update();
+
   // Check if a client has connected
-  WiFiClient client = server.available();
-  if (!client) {
-    return;
-  }
+  WiFiClient client = server.accept();
+  if (!client) { return; }
   Serial.println("");
   Serial.println("New client");
 
   // Wait for data from client to become available
-  while (client.connected() && !client.available()) {
-    delay(1);
-  }
+  while (client.connected() && !client.available()) { delay(1); }
 
   // Read the first line of HTTP request
   String req = client.readStringUntil('\r');
@@ -113,4 +115,3 @@ void loop(void) {
 
   Serial.println("Done with client");
 }
-

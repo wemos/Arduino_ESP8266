@@ -16,9 +16,17 @@
 #include <ESP8266WiFi.h>
 #include <stdio.h>
 
-const char* ssid     = "ap-ssid";
-const char* password = "ap-password";
+#ifndef APSSID
+#define APSSID "esp8266"
+#define APPSK "esp8266"
+#endif
 
+const char* ssid = APSSID;
+const char* password = APPSK;
+
+// WiFi.on* methods **must** only be called **after** entering setup().
+// Assigning immediately in global scope is not adviced, neither is assigning them within any other object constructors.
+// These variables **may** exist in function block, but **only** if they are declared as `static`
 WiFiEventHandler stationConnectedHandler;
 WiFiEventHandler stationDisconnectedHandler;
 WiFiEventHandler probeRequestPrintHandler;
@@ -38,12 +46,12 @@ void setup() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
 
-  // Register event handlers.
-  // Callback functions will be called as long as these handler objects exist.
   // Call "onStationConnected" each time a station connects
   stationConnectedHandler = WiFi.onSoftAPModeStationConnected(&onStationConnected);
+
   // Call "onStationDisconnected" each time a station disconnects
   stationDisconnectedHandler = WiFi.onSoftAPModeStationDisconnected(&onStationDisconnected);
+
   // Call "onProbeRequestPrint" and "onProbeRequestBlink" each time
   // a probe request is received.
   // Former will print MAC address of the station and RSSI to Serial,
@@ -93,7 +101,6 @@ void loop() {
 
 String macToString(const unsigned char* mac) {
   char buf[20];
-  snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return String(buf);
 }

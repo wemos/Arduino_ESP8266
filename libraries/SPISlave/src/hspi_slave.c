@@ -28,8 +28,9 @@ static void (*_hspi_slave_rx_status_cb)(void * arg, uint32_t data) = NULL;
 static void (*_hspi_slave_tx_status_cb)(void * arg) = NULL;
 static uint8_t _hspi_slave_buffer[33];
 
-void ICACHE_RAM_ATTR _hspi_slave_isr_handler(void *arg)
+void IRAM_ATTR _hspi_slave_isr_handler(void *arg, void *frame)
 {
+    (void) frame;
     uint32_t status;
     uint32_t istatus;
 
@@ -72,11 +73,10 @@ void ICACHE_RAM_ATTR _hspi_slave_isr_handler(void *arg)
 
 void hspi_slave_begin(uint8_t status_len, void * arg)
 {
-    status_len &= 7;
     if(status_len > 4) {
         status_len = 4;    //max 32 bits
     }
-    if(status_len == 0) {
+    else if(status_len == 0) {
         status_len = 1;    //min 8 bits
     }
 
@@ -85,13 +85,23 @@ void hspi_slave_begin(uint8_t status_len, void * arg)
     pinMode(MISO, SPECIAL);
     pinMode(MOSI, SPECIAL);
 
-    SPI1S = SPISE | SPISBE | 0x3E0;
-    SPI1U = SPIUMISOH | SPIUCOMMAND | SPIUSSE;
+    SPI1S = SPISE | SPISBE | SPISTRIE | SPISWBIE | SPISRSIE | SPISWSIE | SPISRBIE;	//(0x63E0)
+    //setting config bits in SPI_SLAVE_REG, defined in "esp8266_peri.h" :
+    //SPISE - spi slave enable
+    //SPISBE - allows work (read/write) with buffer, without this only? status available
+    //SPISTRIE - enables TRANS?? interrupt
+    //other SPISxxIE - enables corresponding interrupts (read(R)/write(W) status(S) and buffer(B))
+  
+    SPI1U = SPIUMISOH | SPIUCOMMAND | SPIUSSE; // SPI_USER_REG
     SPI1CLK = 0;
-    SPI1U2 = (7 << SPILCOMMAND);
-    SPI1S1 = (((status_len * 8) - 1) << SPIS1LSTA) | (0xff << SPIS1LBUF) | (7 << SPIS1LWBA) | (7 << SPIS1LRBA) | SPIS1RSTA;
+    SPI1U2 = (7 << SPILCOMMAND); // SPI_USER2_REG
+    SPI1S1 = (((status_len * 8) - 1) << SPIS1LSTA) | (0xff << SPIS1LBUF) | (7 << SPIS1LWBA) | (7 << SPIS1LRBA) | SPIS1RSTA; // SPI_SLAVE1_REG
     SPI1P = (1 << 19);
     SPI1CMD = SPIBUSY;
+
+    // Setting SPIC2MISODM_S makes slave to change MISO value on falling edge on CLK signal as is required for SPIMode 1
+    // Setting SPIC2MOSIDN_S is probably not critical, all tests run fine with this setting
+    SPI1C2 = (0x2 << SPIC2MOSIDN_S) | (0x1 << SPIC2MISODM_S);
 
     ETS_SPI_INTR_ATTACH(_hspi_slave_isr_handler,arg);
     ETS_SPI_INTR_ENABLE();
@@ -114,7 +124,7 @@ void hspi_slave_end()
   SPI1P = B110;
 }
 
-void hspi_slave_setStatus(uint32_t status)
+void IRAM_ATTR hspi_slave_setStatus(uint32_t status)
 {
     SPI1WS = status;
 }

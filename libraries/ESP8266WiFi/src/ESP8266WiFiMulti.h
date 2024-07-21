@@ -1,10 +1,10 @@
 /**
  *
  * @file ESP8266WiFiMulti.h
- * @date 16.05.2015
- * @author Markus Sattler
+ * @date 30.09.2020
+ * @author Markus Sattler, Erriez
  *
- * Copyright (c) 2015 Markus Sattler. All rights reserved.
+ * Copyright (c) 2015-2020 Markus Sattler. All rights reserved.
  * This file is part of the esp8266 core for Arduino environment.
  *
  * This library is free software; you can redistribute it and/or
@@ -24,43 +24,63 @@
  */
 
 
-#ifndef WIFICLIENTMULTI_H_
-#define WIFICLIENTMULTI_H_
+#ifndef WIFI_CLIENT_MULTI_H_
+#define WIFI_CLIENT_MULTI_H_
 
 #include "ESP8266WiFi.h"
 #include <vector>
 
 #ifdef DEBUG_ESP_WIFI
 #ifdef DEBUG_ESP_PORT
-#define DEBUG_WIFI_MULTI(...) DEBUG_ESP_PORT.printf( __VA_ARGS__ )
+#define DEBUG_WIFI_MULTI(fmt, ...) DEBUG_ESP_PORT.printf_P( (PGM_P)PSTR(fmt), ##__VA_ARGS__ )
 #endif
 #endif
 
 #ifndef DEBUG_WIFI_MULTI
-#define DEBUG_WIFI_MULTI(...)
+#define DEBUG_WIFI_MULTI(...) do { (void)0; } while (0)
+#endif
+
+//! Default WiFi connection timeout in ms
+#ifndef WIFI_CONNECT_TIMEOUT_MS
+#define WIFI_CONNECT_TIMEOUT_MS     5000
+#endif
+
+//! Default WiFi scan timeout in ms
+#ifndef WIFI_SCAN_TIMEOUT_MS
+#define WIFI_SCAN_TIMEOUT_MS        5000
 #endif
 
 struct WifiAPEntry {
-    char * ssid;
-    char * passphrase;
+    char *ssid;
+    char *passphrase;
 };
 
 typedef std::vector<WifiAPEntry> WifiAPlist;
 
-class ESP8266WiFiMulti {
-    public:
-        ESP8266WiFiMulti();
-        ~ESP8266WiFiMulti();
+class ESP8266WiFiMulti
+{
+public:
+    ESP8266WiFiMulti();
+    ~ESP8266WiFiMulti();
 
-        bool addAP(const char* ssid, const char *passphrase = NULL);
+    bool addAP(const char *ssid, const char *passphrase = NULL);
+    bool existsAP(const char *ssid, const char *passphrase = NULL);
 
-        wl_status_t run(void);
+    wl_status_t run(uint32_t connectTimeoutMs=WIFI_CONNECT_TIMEOUT_MS);
 
-    private:
-        WifiAPlist APlist;
-        bool APlistAdd(const char* ssid, const char *passphrase = NULL);
-        void APlistClean(void);
+    void cleanAPlist();
+    int count() { return _APlist.size(); }
+private:
+    WifiAPlist _APlist;
+    bool _firstRun;
 
+    bool APlistAdd(const char *ssid, const char *passphrase = NULL);
+    bool APlistExists(const char *ssid, const char *passphrase = NULL);
+    void APlistClean();
+
+    wl_status_t connectWiFiMulti(uint32_t connectTimeoutMs);
+    int8_t startScan();
+    void printWiFiScan();
 };
 
-#endif /* WIFICLIENTMULTI_H_ */
+#endif // WIFI_CLIENT_MULTI_H_

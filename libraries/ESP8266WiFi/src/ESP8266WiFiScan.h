@@ -41,12 +41,14 @@ class ESP8266WiFiScanClass {
         void scanDelete();
 
         // scan result
+        const bss_info *getScanInfoByIndex(int i);
         bool getNetworkInfo(uint8_t networkItem, String &ssid, uint8_t &encryptionType, int32_t &RSSI, uint8_t* &BSSID, int32_t &channel, bool &isHidden);
 
         String SSID(uint8_t networkItem);
         uint8_t encryptionType(uint8_t networkItem);
         int32_t RSSI(uint8_t networkItem);
         uint8_t * BSSID(uint8_t networkItem);
+        uint8_t * BSSID(uint8_t networkItem, uint8_t* bssid);
         String BSSIDstr(uint8_t networkItem);
         int32_t channel(uint8_t networkItem);
         bool isHidden(uint8_t networkItem);

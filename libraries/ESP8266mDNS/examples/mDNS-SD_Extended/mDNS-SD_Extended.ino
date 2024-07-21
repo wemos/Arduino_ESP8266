@@ -12,9 +12,14 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 
-const char* ssid     = "...";
-const char* password = "...";
-char hostString[16] = {0};
+#ifndef STASSID
+#define STASSID "your-ssid"
+#define STAPSK "your-password"
+#endif
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
+char hostString[16] = { 0 };
 
 void setup() {
   Serial.begin(115200);
@@ -38,14 +43,12 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  if (!MDNS.begin(hostString)) {
-    Serial.println("Error setting up MDNS responder!");
-  }
+  if (!MDNS.begin(hostString)) { Serial.println("Error setting up MDNS responder!"); }
   Serial.println("mDNS responder started");
-  MDNS.addService("esp", "tcp", 8080); // Announce esp tcp service on port 8080
+  MDNS.addService("esp", "tcp", 8080);  // Announce esp tcp service on port 8080
 
   Serial.println("Sending mDNS query");
-  int n = MDNS.queryService("esp", "tcp"); // Send out query for esp tcp services
+  int n = MDNS.queryService("esp", "tcp");  // Send out query for esp tcp services
   Serial.println("mDNS query done");
   if (n == 0) {
     Serial.println("no services found");
@@ -71,5 +74,5 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-
+  MDNS.update();
 }

@@ -113,12 +113,12 @@ extern "C" {
 struct uart_;
 typedef struct uart_ uart_t;
 
-uart_t* uart_init(int uart_nr, int baudrate, int config, int mode, int tx_pin, size_t rx_size);
+uart_t* uart_init(int uart_nr, int baudrate, int config, int mode, int tx_pin, size_t rx_size, bool invert);
 void uart_uninit(uart_t* uart);
 
-void uart_swap(uart_t* uart, int tx_pin);
-void uart_set_tx(uart_t* uart, int tx_pin);
-void uart_set_pins(uart_t* uart, int tx, int rx);
+bool uart_swap(uart_t* uart, int tx_pin);
+bool uart_set_tx(uart_t* uart, int tx_pin);
+bool uart_set_pins(uart_t* uart, int tx, int rx);
 bool uart_tx_enabled(uart_t* uart);
 bool uart_rx_enabled(uart_t* uart);
 
@@ -126,17 +126,20 @@ void uart_set_baudrate(uart_t* uart, int baud_rate);
 int uart_get_baudrate(uart_t* uart);
 
 size_t uart_resize_rx_buffer(uart_t* uart, size_t new_size);
+size_t uart_get_rx_buffer_size(uart_t* uart);
 
 size_t uart_write_char(uart_t* uart, char c);
 size_t uart_write(uart_t* uart, const char* buf, size_t size);
 int uart_read_char(uart_t* uart);
 int uart_peek_char(uart_t* uart);
+size_t uart_read(uart_t* uart, char* buffer, size_t size);
 size_t uart_rx_available(uart_t* uart);
 size_t uart_tx_free(uart_t* uart);
 void uart_wait_tx_empty(uart_t* uart);
 void uart_flush(uart_t* uart);
 
 bool uart_has_overrun (uart_t* uart); // returns then clear overrun flag
+bool uart_has_rx_error (uart_t* uart); // returns then clear rxerror flag
 
 void uart_set_debug(int uart_nr);
 int uart_get_debug();
@@ -144,6 +147,17 @@ int uart_get_debug();
 void uart_start_detect_baudrate(int uart_nr);
 int uart_detect_baudrate(int uart_nr);
 
+// return number of byte accessible by peekBuffer()
+size_t uart_peek_available (uart_t* uart);
+
+// return a pointer to available data buffer (size = available())
+// semantic forbids any kind of read() before calling peekConsume()
+const char* uart_peek_buffer (uart_t* uart);
+
+// consume bytes after use (see peekBuffer)
+void uart_peek_consume (uart_t* uart, size_t consume);
+
+uint8_t uart_get_bit_length(const int uart_nr);
 
 #if defined (__cplusplus)
 } // extern "C"

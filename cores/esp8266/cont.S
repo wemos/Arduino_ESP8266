@@ -18,16 +18,22 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-    .text
+    .section .irom0.text
     .align    4
     .literal_position
-    .global   cont_yield
-    .type     cont_yield, @function
-cont_yield:
+    .global   cont_suspend
+    .type     cont_suspend, @function
+cont_suspend:
     /* a1: sp */
     /* a2: void* cont_ctx */
-    /* adjust stack and save registers */
+    /* adjust stack */
     addi    a1,  a1, -24
+
+    /* make sure that a1 points after cont_ctx.stack[] */
+    addi    a4,  a2, 32
+    bltu    a1,  a4, cont_overflow
+
+    /* save registers */
     s32i    a12, a1, 0
     s32i    a13, a1, 4
     s32i    a14, a1, 8
@@ -35,10 +41,10 @@ cont_yield:
     s32i    a0,  a1, 16
     s32i    a2,  a1, 20
 
-    /* &cont_continue -> cont_ctx.pc_yield */
+    /* &cont_continue -> cont_ctx.pc_suspend */
     movi    a3, cont_continue
     s32i    a3, a2, 8
-    /* sp -> cont_ctx.sp_yield */
+    /* sp -> cont_ctx.sp_suspend */
     s32i    a1, a2, 12
 
     /* a0 <- cont_ctx.pc_ret */
@@ -46,6 +52,11 @@ cont_yield:
     /* sp <- cont_ctx.sp_ret */
     l32i    a1, a2, 4
     jx      a0
+
+cont_overflow:
+    mov.n   a3,  a1
+    movi    a4, __stack_overflow
+    jx      a4
 
 cont_continue:
     l32i    a12, a1, 0
@@ -56,7 +67,7 @@ cont_continue:
     l32i    a2,  a1, 20
     addi    a1,  a1, 24
     ret
-    .size    cont_yield, . - cont_yield
+    .size    cont_suspend, . - cont_suspend
 
 ////////////////////////////////////////////////////
 
@@ -84,7 +95,7 @@ cont_wrapper:
 
 ////////////////////////////////////////////////////
 
-    .text
+    .section .irom0.text
     .align   4
     .literal_position
     .global  cont_run
@@ -108,25 +119,28 @@ cont_run:
     /* sp -> cont_ctx.sp_ret */
     s32i    a1, a2, 4
 
-    /* if cont_ctx.pc_yield != 0, goto cont_resume */
+    /* if cont_ctx.pc_suspend != 0, goto cont_resume */
     l32i    a4, a2, 8
     bnez    a4, cont_resume
     /* else */
     /* set new stack*/
-    l32i    a1, a2, 16;
+    l32i    a1, a2, 16
     /* goto pfn */
     movi    a2, cont_wrapper
     jx      a2
 
 cont_resume:
-    /* a1 <- cont_ctx.sp_yield */
+    /* a1 <- cont_ctx.sp_suspend */
     l32i    a1, a2, 12
-    /* reset yield flag, 0 -> cont_ctx.pc_yield */
+    /* make sure that a1 points after cont_ctx.stack[] */
+    addi    a5,  a2, 32
+    bltu    a1,  a5, cont_overflow
+    /* reset yield flag, 0 -> cont_ctx.pc_suspend */
     movi    a3, 0
     s32i    a3, a2, 8
-    /* jump to saved cont_ctx.pc_yield */
+    /* jump to saved cont_ctx.pc_suspend */
     movi    a0, cont_ret
-    jx       a4
+    jx      a4
 
 cont_norm:
     /* calculate pointer to cont_ctx.struct_start from sp */

@@ -6,8 +6,8 @@ What to Download
 
 -  `arduino IDE <https://www.arduino.cc/en/Main/Software>`__
 -  `Eclipse IDE for C/C++
-   Developers <http://www.eclipse.org/downloads/packages/eclipse-ide-cc-developers/oxygen3a>`__
--  `Java <http://www.java.com/>`__
+   Developers <https://www.eclipse.org/downloads/packages/eclipse-ide-cc-developers/oxygen3a>`__
+-  `Java <https://www.java.com/>`__
 
 Setup Arduino
 ~~~~~~~~~~~~~
@@ -18,8 +18,8 @@ See the
 Setup Eclipse
 ~~~~~~~~~~~~~
 
--  `step 1 <http://www.baeyens.it/eclipse/how_to.shtml#/c>`__
--  `step 2 <http://www.baeyens.it/eclipse/how_to.shtml#/e>`__
+-  `step 1 <https://www.baeyens.it/eclipse/how_to.shtml#/c>`__
+-  `step 2 <https://www.baeyens.it/eclipse/how_to.shtml#/e>`__
 -  go to Window --> preferences --> Arduino
 -  add as private hardware path the Part to the ESP8266
 
@@ -31,8 +31,8 @@ example private hardware path
     Windows: C:\Users\[username]\AppData\Roaming\Arduino15\packages\esp8266\hardware
     Linux: /home/[username]/.arduino15/packages/esp8266/hardware
 
-Eclipse wont build
-~~~~~~~~~~~~~~~~~~
+Eclipse won't build
+~~~~~~~~~~~~~~~~~~~
 
 if eclipse dont find the path to the Compiler add to the platform.txt
 after:
